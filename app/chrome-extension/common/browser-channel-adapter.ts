@@ -10,7 +10,7 @@
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 import type { ToolResult } from './tool-handler';
 
-export type BrowserAction = 'navigate' | 'read' | 'click' | 'fill' | 'screenshot';
+export type BrowserAction = 'navigate' | 'read' | 'click' | 'fill' | 'screenshot' | 'scroll';
 
 export interface CommandEnvelope {
   command_id: string;
@@ -30,7 +30,10 @@ export interface ResultEnvelope {
 
 // ACTION → { internal tool name, arg transform }. This is the ONLY place the
 // platform's bounded-five vocabulary meets the fork's internal tool names.
-const ACTION_MAP: Record<BrowserAction, { tool: string; buildArgs: (a: Record<string, any>) => Record<string, any> }> = {
+const ACTION_MAP: Record<
+  BrowserAction,
+  { tool: string; buildArgs: (a: Record<string, any>) => Record<string, any> }
+> = {
   navigate: {
     tool: TOOL_NAMES.BROWSER.NAVIGATE, // chrome_navigate
     buildArgs: (a) => ({ url: a.url }),
@@ -49,7 +52,20 @@ const ACTION_MAP: Record<BrowserAction, { tool: string; buildArgs: (a: Record<st
   },
   screenshot: {
     tool: TOOL_NAMES.BROWSER.SCREENSHOT, // chrome_screenshot
-    buildArgs: (a) => ({ name: 'browser_screenshot', storeBase64: true, fullPage: false, selector: a.selector || undefined }),
+    buildArgs: (a) => ({
+      name: 'browser_screenshot',
+      storeBase64: true,
+      fullPage: false,
+      selector: a.selector || undefined,
+    }),
+  },
+  scroll: {
+    tool: TOOL_NAMES.BROWSER.SCROLL, // chrome_scroll
+    buildArgs: (a) => ({
+      selector: a.selector || undefined,
+      direction: a.direction || 'down',
+      amount: a.amount,
+    }),
   },
 };
 
@@ -57,7 +73,10 @@ export function isSupportedAction(action: string): action is BrowserAction {
   return Object.prototype.hasOwnProperty.call(ACTION_MAP, action);
 }
 
-export function resolveToolCall(action: BrowserAction, args: Record<string, any>): { name: string; args: Record<string, any> } {
+export function resolveToolCall(
+  action: BrowserAction,
+  args: Record<string, any>,
+): { name: string; args: Record<string, any> } {
   const m = ACTION_MAP[action];
   return { name: m.tool, args: m.buildArgs(args || {}) };
 }
@@ -66,13 +85,18 @@ export function resolveToolCall(action: BrowserAction, args: Record<string, any>
 function firstText(result: ToolResult): string {
   if (!result || !Array.isArray(result.content)) return '';
   for (const c of result.content) {
-    if (c && (c as any).type === 'text' && typeof (c as any).text === 'string') return (c as any).text;
+    if (c && (c as any).type === 'text' && typeof (c as any).text === 'string')
+      return (c as any).text;
   }
   return '';
 }
 
 // Adapt a ToolResult to the platform RESULT envelope for a given command/action.
-export function toResultEnvelope(action: BrowserAction, command: CommandEnvelope, result: ToolResult): ResultEnvelope {
+export function toResultEnvelope(
+  action: BrowserAction,
+  command: CommandEnvelope,
+  result: ToolResult,
+): ResultEnvelope {
   const base = { command_id: command.command_id, correlation_id: command.correlation_id };
   const text = firstText(result);
 
@@ -82,7 +106,13 @@ export function toResultEnvelope(action: BrowserAction, command: CommandEnvelope
       status: 'failed',
       message: text || 'Browser action failed',
       data: {},
-      errors: [{ code: 'BROWSER_ACTION_FAILED', message: text || 'Browser action failed', severity: 'error' }],
+      errors: [
+        {
+          code: 'BROWSER_ACTION_FAILED',
+          message: text || 'Browser action failed',
+          severity: 'error',
+        },
+      ],
     };
   }
 
@@ -96,8 +126,16 @@ export function toResultEnvelope(action: BrowserAction, command: CommandEnvelope
       const parsed = JSON.parse(text);
       base64 = parsed.base64Data || parsed.base64 || '';
       mediaType = parsed.mimeType || parsed.media_type || mediaType;
-    } catch (e) { /* fall through to empty */ }
-    return { ...base, status: 'success', message: 'Screenshot captured', data: { base64, media_type: mediaType }, errors: [] };
+    } catch (e) {
+      /* fall through to empty */
+    }
+    return {
+      ...base,
+      status: 'success',
+      message: 'Screenshot captured',
+      data: { base64, media_type: mediaType },
+      errors: [],
+    };
   }
 
   // Other actions: try to parse the text as a JSON object payload; otherwise
@@ -109,11 +147,15 @@ export function toResultEnvelope(action: BrowserAction, command: CommandEnvelope
   } catch (e) {
     data = text ? { text } : {};
   }
-  return { ...base, status: 'success', message: data.message || (action + ' ok'), data, errors: [] };
+  return { ...base, status: 'success', message: data.message || action + ' ok', data, errors: [] };
 }
 
 // Build a server-shaped failure envelope (unsupported action, internal error).
-export function failureEnvelope(command: CommandEnvelope, code: string, message: string): ResultEnvelope {
+export function failureEnvelope(
+  command: CommandEnvelope,
+  code: string,
+  message: string,
+): ResultEnvelope {
   return {
     command_id: command.command_id,
     correlation_id: command.correlation_id,

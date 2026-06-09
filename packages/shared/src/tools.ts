@@ -11,6 +11,7 @@ export const TOOL_NAMES = {
     WEB_FETCHER: 'chrome_get_web_content',
     CLICK: 'chrome_click_element',
     FILL: 'chrome_fill_or_select',
+    SCROLL: 'chrome_scroll',
     REQUEST_ELEMENT_SELECTION: 'chrome_request_element_selection',
     GET_INTERACTIVE_ELEMENTS: 'chrome_get_interactive_elements',
     NETWORK_CAPTURE: 'chrome_network_capture',
