@@ -23,7 +23,7 @@ const STATE_LABEL: Record<ConnState, string> = {
 const app = document.getElementById('app')!;
 app.innerHTML = `
   <div class="kc">
-    <div class="kc-head"><span class="kc-dot" id="kc-dot"></span><h1 id="kc-title">Browser Channel</h1></div>
+    <div class="kc-head"><span class="kc-dot" id="kc-dot"></span><h1 id="kc-title">Kareenos Extension</h1></div>
     <div class="kc-row"><span class="kc-k">Status</span><span class="kc-v" id="kc-status">…</span></div>
     <div class="kc-row"><span class="kc-k">Account</span><span class="kc-v" id="kc-account">—</span></div>
     <div class="kc-row"><span class="kc-k">Project</span><span class="kc-v" id="kc-project">—</span></div>

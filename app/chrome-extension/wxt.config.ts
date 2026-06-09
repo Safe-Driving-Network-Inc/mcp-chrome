@@ -45,8 +45,10 @@ export default defineConfig({
     // Use environment variable for the key, fallback to undefined if not set
     key: CHROME_EXTENSION_KEY,
     default_locale: 'zh_CN',
-    name: '__MSG_extensionName__',
-    description: '__MSG_extensionDescription__',
+    // Kareenos branding — literal (locale-independent) name/description.
+    name: 'Kareenos Extension',
+    description:
+      'Kareenos attended browser channel — lets your Kareenos agents read and act in your signed-in browser, on your behalf.',
     permissions: [
       // Kareenos Browser Channel: trimmed to what the bounded five + the wss client
       // actually use. Removed (zero usages after the off-scope-tool deletions):
@@ -74,7 +76,7 @@ export default defineConfig({
     },
     action: {
       default_popup: 'popup.html',
-      default_title: 'Chrome MCP Server',
+      default_title: 'Kareenos Extension',
     },
     // Chrome Side Panel entry for workflow management
     // Ref: https://developer.chrome.com/docs/extensions/reference/api/sidePanel
