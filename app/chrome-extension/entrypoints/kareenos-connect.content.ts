@@ -20,8 +20,11 @@ export default defineContentScript({
   matches: MATCHES,
   main() {
     window.addEventListener('message', (event: MessageEvent) => {
-      // Only same-window messages from the sign-in page; ignore cross-origin frames.
-      if (event.source !== window) return;
+      // Identify the sign-in message by its source MARKER, not event.source: the
+      // callback page may post to window.opener (this page is the opener), in which
+      // case event.source is the popup window, not `window`. The content script
+      // only runs on trusted matched origins, and the token is re-verified
+      // server-side on bind, so the marker is a safe trigger.
       const d: any = event.data;
       if (!d || d.source !== 'kareenos-browser-channel' || d.ok !== true) return;
       const payload = d.data || {};
