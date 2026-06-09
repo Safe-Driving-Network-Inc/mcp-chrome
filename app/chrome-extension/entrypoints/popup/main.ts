@@ -11,7 +11,7 @@ const CONNECT_URL_KEY = 'kareenos_connect_url';
 const TOKEN_KEY = 'kareenos_channel_token';
 const DEFAULT_CONNECT_URL =
   import.meta.env.VITE_KAREENOS_CONNECT_URL ||
-  'https://ap4.sdnvision.services/kareenos/connectextension';
+  'https://ap4.sdnvision.services:8443/kareenos/connectextension';
 
 const STATE_LABEL: Record<ConnState, string> = {
   disconnected: 'Disconnected',
