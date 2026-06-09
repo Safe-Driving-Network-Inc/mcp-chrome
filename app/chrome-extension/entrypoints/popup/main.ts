@@ -10,7 +10,8 @@ type ConnState = 'disconnected' | 'connecting' | 'bound' | 'error';
 const CONNECT_URL_KEY = 'kareenos_connect_url';
 const TOKEN_KEY = 'kareenos_channel_token';
 const DEFAULT_CONNECT_URL =
-  import.meta.env.VITE_KAREENOS_CONNECT_URL || 'https://ap4.sdnvision.services/connect-extension';
+  import.meta.env.VITE_KAREENOS_CONNECT_URL ||
+  'https://ap4.sdnvision.services/kareenos/connectextension';
 
 const STATE_LABEL: Record<ConnState, string> = {
   disconnected: 'Disconnected',
@@ -46,7 +47,9 @@ async function renderBound() {
     const b = r?.kareenos_bound || {};
     $('kc-account').textContent = b.accountid || '—';
     $('kc-project').textContent = b.projectid || '—';
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    /* ignore */
+  }
 }
 
 async function getConnectUrl(): Promise<string> {
@@ -72,7 +75,11 @@ $('kc-signin').addEventListener('click', async () => {
 });
 
 $('kc-disconnect').addEventListener('click', async () => {
-  try { await chrome.storage.session.remove(TOKEN_KEY); } catch (e) { /* ignore */ }
+  try {
+    await chrome.storage.session.remove(TOKEN_KEY);
+  } catch (e) {
+    /* ignore */
+  }
   chrome.runtime.sendMessage({ type: 'browser_channel_disconnect' }).catch(() => {});
   renderState('disconnected');
 });
@@ -83,7 +90,8 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 // Initial paint.
-chrome.runtime.sendMessage({ type: 'browser_channel_get_state' })
+chrome.runtime
+  .sendMessage({ type: 'browser_channel_get_state' })
   .then((res: any) => renderState((res && res.state) || 'disconnected'))
   .catch(() => renderState('disconnected'));
 renderBound();
