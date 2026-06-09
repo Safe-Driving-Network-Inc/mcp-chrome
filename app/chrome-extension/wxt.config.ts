@@ -17,8 +17,9 @@ const IS_DEV = process.env.NODE_ENV !== 'production' && process.env.MODE !== 'pr
 // Kareenos Browser Channel: origins of the Kareenos connect page that may sign
 // the extension in directly via externally_connectable (parallel to the
 // content-script relay). White-label builds set VITE_KAREENOS_MATCHES.
-const KAREENOS_CONNECT_MATCHES = (process.env.VITE_KAREENOS_MATCHES ||
-  'https://*.sdnvision.services/*')
+const KAREENOS_CONNECT_MATCHES = (
+  process.env.VITE_KAREENOS_MATCHES || 'https://*.sdnvision.services/*'
+)
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -47,23 +48,18 @@ export default defineConfig({
     name: '__MSG_extensionName__',
     description: '__MSG_extensionDescription__',
     permissions: [
-      // 'nativeMessaging' removed — the native-messaging host is deleted; the
-      // only command source is the outbound wss client. (Further permission
-      // trimming — webRequest/debugger/history/bookmarks/declarativeNetRequest —
-      // happens with the deferred off-scope-code cleanup, in a build-verified pass.)
+      // Kareenos Browser Channel: trimmed to what the bounded five + the wss client
+      // actually use. Removed (zero usages after the off-scope-tool deletions):
+      // nativeMessaging, webRequest, history, bookmarks, declarativeNetRequest.
       'tabs',
       'activeTab',
       'scripting',
       'contextMenus',
       'downloads',
-      'webRequest',
       'webNavigation',
       'debugger',
-      'history',
-      'bookmarks',
       'offscreen',
       'storage',
-      'declarativeNetRequest',
       'alarms',
       // Allow programmatic control of Chrome Side Panel
       'sidePanel',
