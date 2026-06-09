@@ -1,9 +1,11 @@
 import { createErrorResponse } from '@/common/tool-handler';
 import { ERROR_MESSAGES } from '@/common/constants';
 import * as browserTools from './browser';
-import { flowRunTool, listPublishedFlowsTool } from './record-replay';
 
-const tools = { ...browserTools, flowRunTool, listPublishedFlowsTool } as any;
+// Kareenos Browser Channel: the registry is the security boundary — only the
+// bounded five browser tools are registered/callable. Record-replay flows and
+// every other off-scope tool are intentionally NOT registered.
+const tools = { ...browserTools } as any;
 const toolsMap = new Map(Object.values(tools).map((tool: any) => [tool.name, tool]));
 
 /**

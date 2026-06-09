@@ -1,7 +1,6 @@
 import { createErrorResponse, ToolResult } from '@/common/tool-handler';
 import { BaseBrowserToolExecutor } from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
-import { captureFrameOnAction, isAutoCaptureActive } from './gif-recorder';
 
 // Default window dimensions
 const DEFAULT_WINDOW_WIDTH = 1280;
@@ -25,17 +24,11 @@ class NavigateTool extends BaseBrowserToolExecutor {
   name = TOOL_NAMES.BROWSER.NAVIGATE;
 
   /**
-   * Trigger GIF auto-capture after successful navigation
+   * Auto-capture hook removed for the Kareenos browser channel (GIF recording is
+   * out of scope). Kept as a no-op so existing call sites need no change.
    */
-  private async triggerAutoCapture(tabId: number, url?: string): Promise<void> {
-    if (!isAutoCaptureActive(tabId)) {
-      return;
-    }
-    try {
-      await captureFrameOnAction(tabId, { type: 'navigate', url });
-    } catch (error) {
-      console.warn('[NavigateTool] Auto-capture failed:', error);
-    }
+  private async triggerAutoCapture(_tabId: number, _url?: string): Promise<void> {
+    return;
   }
 
   async execute(args: NavigateToolParams): Promise<ToolResult> {

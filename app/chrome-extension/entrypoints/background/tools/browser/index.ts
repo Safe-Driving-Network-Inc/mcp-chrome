@@ -1,30 +1,8 @@
-export { navigateTool, closeTabsTool, switchTabTool } from './common';
-export { windowTool } from './window';
-export { vectorSearchTabsContentTool as searchTabsContentTool } from './vector-search';
-export { screenshotTool } from './screenshot';
-export { webFetcherTool, getInteractiveElementsTool } from './web-fetcher';
-export { clickTool, fillTool } from './interaction';
-export { elementPickerTool } from './element-picker';
-export { networkRequestTool } from './network-request';
-export { networkCaptureTool } from './network-capture';
-// Legacy exports (for internal use by networkCaptureTool)
-export { networkDebuggerStartTool, networkDebuggerStopTool } from './network-capture-debugger';
-export { networkCaptureStartTool, networkCaptureStopTool } from './network-capture-web-request';
-export { keyboardTool } from './keyboard';
-export { historyTool } from './history';
-export { bookmarkSearchTool, bookmarkAddTool, bookmarkDeleteTool } from './bookmark';
-export { injectScriptTool, sendCommandToInjectScriptTool } from './inject-script';
-export { javascriptTool } from './javascript';
-export { consoleTool } from './console';
-export { fileUploadTool } from './file-upload';
+// Kareenos Browser Channel — the bounded FIVE. This barrel is the capability
+// boundary: handleCallTool (tools/index.ts) registers exactly what is exported
+// here, so only these five actions are ever callable. Arbitrary-script-exec,
+// network capture, tab management, history/bookmarks/console, etc. are removed.
+export { navigateTool } from './common';
 export { readPageTool } from './read-page';
-export { computerTool } from './computer';
-export { handleDialogTool } from './dialog';
-export { handleDownloadTool } from './download';
-export { userscriptTool } from './userscript';
-export {
-  performanceStartTraceTool,
-  performanceStopTraceTool,
-  performanceAnalyzeInsightTool,
-} from './performance';
-export { gifRecorderTool } from './gif-recorder';
+export { clickTool, fillTool } from './interaction';
+export { screenshotTool } from './screenshot';
