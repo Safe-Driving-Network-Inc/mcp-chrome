@@ -59,6 +59,16 @@ async function getToken(): Promise<string | null> {
   }
 }
 
+// Persist a sign-in: the short-lived token goes to session storage (never durable
+// storage — no long-lived refresh token is kept), the bound context to local for
+// the popup to display. The storage.onChanged watcher then triggers a reconnect.
+async function storeSignIn(msg: any): Promise<void> {
+  await chrome.storage.session.set({ [TOKEN_KEY]: msg.token });
+  await chrome.storage.local.set({
+    kareenos_bound: { projectid: msg.projectid || null, accountid: msg.accountid || null, session_id: msg.session_id || null },
+  });
+}
+
 async function getServerUrl(): Promise<string> {
   try {
     const r = await chrome.storage.local.get(SERVER_URL_KEY);
@@ -165,13 +175,21 @@ export function initBrowserChannelClient() {
     });
   } catch (e) { /* ignore */ }
 
-  // Popup → background control messages.
+  // Control + sign-in messages. `browser_channel_signin` is sent either by the
+  // popup, by a content script relaying a window postMessage from the Kareenos
+  // connect page, or directly by that page via externally_connectable — whichever
+  // capture mechanism the deployment chooses (the connect-page origin is the open
+  // config; see P1.4). Payload: { token, session_id?, projectid?, accountid? }.
   try {
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (!msg || !msg.type) return;
       if (msg.type === 'browser_channel_get_state') { sendResponse({ state }); return; }
       if (msg.type === 'browser_channel_reconnect') { reconnectBrowserChannel(); sendResponse({ ok: true }); return; }
       if (msg.type === 'browser_channel_disconnect') { disconnectBrowserChannel(); sendResponse({ ok: true }); return; }
+      if (msg.type === 'browser_channel_signin' && msg.token) {
+        storeSignIn(msg).then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ ok: false, error: e?.message }));
+        return true; // async response
+      }
     });
   } catch (e) { /* ignore */ }
 
