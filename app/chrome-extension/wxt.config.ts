@@ -14,6 +14,15 @@ const CHROME_EXTENSION_KEY = process.env.CHROME_EXTENSION_KEY;
 // Detect dev mode early for manifest-level switches
 const IS_DEV = process.env.NODE_ENV !== 'production' && process.env.MODE !== 'production';
 
+// Kareenos Browser Channel: origins of the Kareenos connect page that may sign
+// the extension in directly via externally_connectable (parallel to the
+// content-script relay). White-label builds set VITE_KAREENOS_MATCHES.
+const KAREENOS_CONNECT_MATCHES = (process.env.VITE_KAREENOS_MATCHES ||
+  'https://*.sdnvision.services/*')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 // See https://wxt.dev/api/config.html
 export default defineConfig({
   modules: ['@wxt-dev/module-vue'],
@@ -60,6 +69,9 @@ export default defineConfig({
       'sidePanel',
     ],
     host_permissions: ['<all_urls>'],
+    // Let the Kareenos connect page sign the extension in directly (the
+    // content-script relay is the parallel, opener-topology-independent path).
+    externally_connectable: { matches: KAREENOS_CONNECT_MATCHES },
     options_ui: {
       page: 'options.html',
       open_in_tab: true,

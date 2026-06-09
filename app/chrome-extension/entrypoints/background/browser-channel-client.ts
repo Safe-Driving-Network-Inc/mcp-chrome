@@ -193,6 +193,17 @@ export function initBrowserChannelClient() {
     });
   } catch (e) { /* ignore */ }
 
+  // Direct sign-in from the Kareenos connect page via externally_connectable
+  // (parallel to the content-script relay). Same payload, same handler.
+  try {
+    chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
+      if (msg && msg.type === 'browser_channel_signin' && msg.token) {
+        storeSignIn(msg).then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ ok: false, error: e?.message }));
+        return true;
+      }
+    });
+  } catch (e) { /* ignore */ }
+
   // Attempt an initial connection on spin-up.
   connect();
 }
