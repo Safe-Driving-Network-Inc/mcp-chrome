@@ -24,15 +24,10 @@ const ENABLE_RR_V3 = true;
  * Initializes all background services and listeners
  */
 export default defineBackground(() => {
-  // Open welcome page on first install
-  chrome.runtime.onInstalled.addListener((details) => {
-    if (details.reason === 'install') {
-      // Open the welcome/onboarding page for new installations
-      chrome.tabs.create({
-        url: chrome.runtime.getURL('/welcome.html'),
-      });
-    }
-  });
+  // No onboarding page: the upstream welcome page instructs installing the
+  // mcp-chrome-bridge + a localhost MCP server, both of which the Kareenos channel
+  // removed. The only setup is the popup → Sign in flow. (Welcome page left in the
+  // build but no longer auto-opened.)
 
   // Initialize core services
   // The outbound wss client — the only command source — binds identity and
