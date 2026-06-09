@@ -90,7 +90,10 @@ if (window.__FILL_HELPER_INITIALIZED__) {
         'range',
       ];
 
-      if (!validTags.includes(element.tagName)) {
+      // Rich-text editors (LinkedIn, Gmail, Notion, etc.) are contenteditable
+      // DIVs, not form controls — they're fillable too (handled by a dedicated
+      // branch below). Let them pass the tag gate.
+      if (!validTags.includes(element.tagName) && !element.isContentEditable) {
         // If the element is a custom element with open shadow root, try to find a fillable inner control
         try {
           const anyEl = /** @type {any} */ (element);
@@ -242,6 +245,47 @@ if (window.__FILL_HELPER_INITIALIZED__) {
         };
       }
 
+      // Rich-text / contenteditable editors (LinkedIn, Gmail, Notion, ProseMirror,
+      // Draft.js, etc.). element.value is meaningless here; insert through the
+      // native editing pipeline so the host framework's beforeinput/input handlers
+      // see it (setting textContent alone is usually ignored by these editors).
+      if (element.isContentEditable) {
+        element.focus();
+        // Select all existing content so the insert replaces it.
+        try {
+          const sel = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        } catch (_) {}
+        let inserted = false;
+        try {
+          inserted = document.execCommand('insertText', false, String(value));
+        } catch (_) {
+          inserted = false;
+        }
+        if (!inserted) {
+          // Fallback: clear + set textContent + fire an input event so frameworks react.
+          element.textContent = String(value);
+          element.dispatchEvent(
+            new InputEvent('input', {
+              bubbles: true,
+              cancelable: true,
+              inputType: 'insertText',
+              data: String(value),
+            }),
+          );
+        }
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        if (typeof element.blur === 'function') element.blur();
+        return {
+          success: true,
+          message: 'Filled contenteditable element' + (inserted ? '' : ' (textContent fallback)'),
+          elementInfo: { ...elementInfo, isContentEditable: true },
+        };
+      }
+
       // Fill the element based on its type
       if (element.tagName === 'SELECT') {
         // For select elements, find the option with matching value or text
@@ -264,12 +308,34 @@ if (window.__FILL_HELPER_INITIALIZED__) {
         // Trigger change event
         element.dispatchEvent(new Event('change', { bubbles: true }));
       } else {
-        // For input and textarea elements
+        // Input / textarea. Use the NATIVE value setter so React-controlled inputs
+        // (which override the value property) actually fire their onChange — setting
+        // element.value directly is silently swallowed by React's synthetic events.
+        let nativeSetter = null;
+        try {
+          const proto =
+            element.tagName === 'TEXTAREA'
+              ? window.HTMLTextAreaElement.prototype
+              : window.HTMLInputElement.prototype;
+          const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+          nativeSetter = desc && desc.set ? desc.set : null;
+        } catch (_) {
+          nativeSetter = null;
+        }
+        const setVal = (v) => {
+          if (nativeSetter) {
+            try {
+              nativeSetter.call(element, v);
+              return;
+            } catch (_) {}
+          }
+          element.value = v;
+        };
         // Clear the current value then set new value
-        element.value = '';
+        setVal('');
         element.dispatchEvent(new Event('input', { bubbles: true }));
 
-        element.value = String(value);
+        setVal(String(value));
 
         element.dispatchEvent(new Event('input', { bubbles: true }));
         element.dispatchEvent(new Event('change', { bubbles: true }));
