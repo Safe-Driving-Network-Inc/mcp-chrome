@@ -30,8 +30,10 @@ import {
 const ALARM_NAME = 'kareenos-browser-channel-heartbeat';
 const TOKEN_KEY = 'kareenos_channel_token';
 const SERVER_URL_KEY = 'kareenos_server_url';
-// Build-time default server (white-label override via chrome.storage.local).
-const DEFAULT_SERVER_URL = (import.meta as any).env?.VITE_BROWSER_CHANNEL_URL || '';
+// Build-time default server (white-label override via .env; runtime override via
+// chrome.storage.local 'kareenos_server_url'). Must include the /browser-channel path.
+const DEFAULT_SERVER_URL =
+  import.meta.env.VITE_BROWSER_CHANNEL_URL || 'wss://ap4.sdnvision.services:8092/browser-channel';
 
 let socket: WebSocket | null = null;
 let connecting = false;

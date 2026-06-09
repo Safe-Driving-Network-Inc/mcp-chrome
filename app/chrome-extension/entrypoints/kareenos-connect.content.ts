@@ -11,8 +11,7 @@
 // patterns). White-label builds set it to the partner's Kareenos origin.
 // Default targets the platform domain + localhost for dev.
 
-const MATCHES = ((import.meta as any).env?.VITE_KAREENOS_MATCHES ||
-  'https://*.sdnvision.services/*,http://localhost/*,http://localhost:*/*')
+const MATCHES = (import.meta.env.VITE_KAREENOS_MATCHES || 'https://*.sdnvision.services/*')
   .split(',')
   .map((s: string) => s.trim())
   .filter(Boolean);
