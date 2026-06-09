@@ -1,6 +1,7 @@
 // Kareenos Browser Channel: the native-messaging host and the semantic-search
 // engine are removed. The ONLY command source is the outbound wss client
 // (P1.3), wired in below. Semantic/vector search is out of scope.
+import { initBrowserChannelClient } from './browser-channel-client';
 import { initStorageManagerListener } from './storage-manager';
 import { initRecordReplayListeners } from './record-replay';
 import { initElementMarkerListeners } from './element-marker';
@@ -34,8 +35,9 @@ export default defineBackground(() => {
   });
 
   // Initialize core services
-  // TODO(P1.3): initBrowserChannelClient() — the outbound wss client that binds
-  // identity and dispatches the bounded five. This replaces initNativeHostListener().
+  // The outbound wss client — the only command source — binds identity and
+  // dispatches the bounded five. Replaces the removed native-messaging host.
+  initBrowserChannelClient();
   initStorageManagerListener();
   // Record & Replay V1/V2 listeners
   initRecordReplayListeners();

@@ -38,7 +38,10 @@ export default defineConfig({
     name: '__MSG_extensionName__',
     description: '__MSG_extensionDescription__',
     permissions: [
-      'nativeMessaging',
+      // 'nativeMessaging' removed — the native-messaging host is deleted; the
+      // only command source is the outbound wss client. (Further permission
+      // trimming — webRequest/debugger/history/bookmarks/declarativeNetRequest —
+      // happens with the deferred off-scope-code cleanup, in a build-verified pass.)
       'tabs',
       'activeTab',
       'scripting',
