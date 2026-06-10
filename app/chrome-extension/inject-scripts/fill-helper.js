@@ -30,7 +30,19 @@ if (window.__FILL_HELPER_INITIALIZED__) {
           };
         }
       } else {
-        element = document.querySelector(selector);
+        // Reuse click-helper's text-aware resolver when present (supports
+        // text=Label targeting); otherwise resolve safely without throwing on an
+        // invalid CSS selector.
+        element =
+          typeof window.__kResolveElement === 'function'
+            ? window.__kResolveElement(selector)
+            : (function () {
+                try {
+                  return document.querySelector(selector);
+                } catch (e) {
+                  return null;
+                }
+              })();
       }
       if (!element) {
         return {

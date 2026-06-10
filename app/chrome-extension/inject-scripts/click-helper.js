@@ -6,6 +6,81 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
   // Already initialized, skip
 } else {
   window.__CLICK_HELPER_INITIALIZED__ = true;
+
+  // --- Kareenos: text-based element targeting ---------------------------------
+  // LinkedIn (and most modern apps) ship hashed/dynamic class names, so the agent
+  // cannot know a stable CSS selector. Let it target by VISIBLE TEXT / aria-label,
+  // which is what a human reads. Supported selector forms (resolved here, before
+  // querySelector): text=Message | text="Message" | :has-text("Message") |
+  // :contains("Message"). Anything else is treated as a normal CSS selector.
+  function __kStripQuotes(s) {
+    s = String(s).trim();
+    if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+      return s.slice(1, -1);
+    }
+    return s;
+  }
+  function __kParseTextQuery(sel) {
+    if (typeof sel !== 'string') return null;
+    let m = sel.match(/^\s*text\s*=\s*(.+)$/i);
+    if (m) return __kStripQuotes(m[1]);
+    m = sel.match(/:(?:has-text|contains)\(\s*(.+?)\s*\)\s*$/i);
+    if (m) return __kStripQuotes(m[1]);
+    return null;
+  }
+  function __kVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    const r = el.getBoundingClientRect();
+    return (el.offsetParent !== null || r.width > 0 || r.height > 0) && r.width > 0 && r.height > 0;
+  }
+  function __kName(el) {
+    const aria = el.getAttribute && el.getAttribute('aria-label');
+    return (aria && aria.trim()) || (el.textContent || '').trim();
+  }
+  function __kPickInnermost(els) {
+    // Prefer the smallest matching element so we click the button, not a wrapper.
+    els.sort((a, b) => {
+      const ra = a.getBoundingClientRect();
+      const rb = b.getBoundingClientRect();
+      return ra.width * ra.height - rb.width * rb.height;
+    });
+    return els[0];
+  }
+  function __kFindByText(query) {
+    const q = String(query).trim().toLowerCase();
+    if (!q) return null;
+    const interactive =
+      'a,button,[role="button"],[role="link"],[role="menuitem"],[role="tab"],' +
+      'input[type="submit"],input[type="button"],[onclick],[tabindex]';
+    const candidates = Array.from(document.querySelectorAll(interactive)).filter(__kVisible);
+    let exact = candidates.filter((el) => __kName(el).toLowerCase() === q);
+    if (exact.length) return __kPickInnermost(exact);
+    let contains = candidates.filter((el) => __kName(el).toLowerCase().includes(q));
+    if (contains.length) return __kPickInnermost(contains);
+    // Fallback: any visible element whose own text matches → climb to a clickable ancestor.
+    const all = Array.from(document.querySelectorAll('*')).filter(
+      (el) => __kVisible(el) && (el.textContent || '').trim().toLowerCase() === q,
+    );
+    for (const el of all) {
+      const c = el.closest('a,button,[role="button"],[role="link"],[onclick]');
+      if (c && __kVisible(c)) return c;
+    }
+    return null;
+  }
+  // Resolve a selector to an element, supporting text= targeting and never
+  // throwing on an invalid CSS selector (returns null instead).
+  function __kResolveElement(sel) {
+    const tq = __kParseTextQuery(sel);
+    if (tq != null) return __kFindByText(tq);
+    try {
+      return document.querySelector(sel);
+    } catch (e) {
+      return null;
+    }
+  }
+  window.__kResolveElement = __kResolveElement;
+  // ---------------------------------------------------------------------------
+
   /**
    * Click on an element matching the selector or at specific coordinates
    * @param {string} selector - CSS selector for the element to click
@@ -116,7 +191,7 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
           };
         }
       } else {
-        element = document.querySelector(selector);
+        element = __kResolveElement(selector);
         if (!element) {
           return {
             error: `Element with selector "${selector}" not found`,
