@@ -122,9 +122,8 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
 
     console.log(`Starting screenshot with options:`, args);
 
-    // Resolve target tab (explicit or active)
-    const explicit = await this.tryGetTab(args.tabId);
-    const tab = explicit || (await this.getActiveTabOrThrowInWindow(args.windowId));
+    // Target the single channel tab the agent drives (same tab navigate steers).
+    const tab = await this.resolveTargetTab(args);
 
     // Check URL restrictions
     if (

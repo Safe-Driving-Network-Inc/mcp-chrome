@@ -4,12 +4,112 @@ import { TIMEOUTS, ERROR_MESSAGES } from '@/common/constants';
 
 const PING_TIMEOUT_MS = 300;
 
+// Kareenos attended browser channel — the agent drives exactly ONE tab (the
+// "channel tab"). Its id is pinned in chrome.storage.session so every tool
+// (navigate / read / click / fill / scroll / screenshot) targets the SAME tab,
+// surviving the ephemeral MV3 service worker within a browser session. Without
+// this, each tool independently guessed "the active tab" and they disagreed —
+// navigate touched tab A while read read tab B — which made the agent's view of
+// the page incoherent and sent it into a tab-spawning loop.
+const CHANNEL_TAB_KEY = 'kareenos:channelTabId';
+
 /**
  * Base class for browser tool executors
  */
 export abstract class BaseBrowserToolExecutor implements ToolExecutor {
   abstract name: string;
   abstract execute(args: any): Promise<ToolResult>;
+
+  /** Read the pinned channel-tab id (null when unset). */
+  protected async getChannelTabId(): Promise<number | null> {
+    try {
+      const o = await chrome.storage.session.get(CHANNEL_TAB_KEY);
+      const id = o?.[CHANNEL_TAB_KEY];
+      return typeof id === 'number' ? id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Pin (or clear, when null) the channel tab the agent drives. */
+  protected async setChannelTab(tab: chrome.tabs.Tab | number | null): Promise<void> {
+    const id = typeof tab === 'number' ? tab : (tab?.id ?? null);
+    try {
+      if (id == null) await chrome.storage.session.remove(CHANNEL_TAB_KEY);
+      else await chrome.storage.session.set({ [CHANNEL_TAB_KEY]: id });
+    } catch {
+      /* storage.session unavailable — fall back to per-call active-tab resolution */
+    }
+  }
+
+  /**
+   * Resolve the single tab the agent drives ("channel tab"). Order:
+   *   1. explicit args.tabId
+   *   2. the pinned channel tab, if it still exists
+   *   3. the active tab in the focused window — which then BECOMES the channel tab
+   * Guarantees navigate/read/click/fill/scroll/screenshot all act on ONE tab.
+   */
+  protected async resolveTargetTab(args?: {
+    tabId?: number;
+    windowId?: number;
+  }): Promise<chrome.tabs.Tab> {
+    // 1. explicit tab id wins and (re)pins the channel tab
+    const explicit = await this.tryGetTab(args?.tabId);
+    if (explicit && explicit.id) {
+      await this.setChannelTab(explicit);
+      return explicit;
+    }
+    // 2. pinned channel tab, if still alive
+    const pinnedId = await this.getChannelTabId();
+    if (pinnedId != null) {
+      const pinned = await this.tryGetTab(pinnedId);
+      if (pinned && pinned.id) return pinned;
+    }
+    // 3. fall back to the active tab and adopt it as the channel tab
+    const active = await this.getActiveTabInWindow(args?.windowId);
+    if (active && active.id) {
+      await this.setChannelTab(active);
+      return active;
+    }
+    throw new Error('No channel tab available — open a tab and try again');
+  }
+
+  /**
+   * Wait until a tab finishes loading (status 'complete'), or until timeout.
+   * navigate() must await this before returning so a subsequent read/click does
+   * not race an un-loaded page (a key cause of the stale-read loop).
+   */
+  protected async waitForTabLoad(tabId: number, timeoutMs = 15000): Promise<void> {
+    try {
+      const t = await chrome.tabs.get(tabId);
+      if (t.status === 'complete') return;
+    } catch {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        try {
+          chrome.tabs.onUpdated.removeListener(listener);
+        } catch {
+          /* noop */
+        }
+        clearTimeout(timer);
+        resolve();
+      };
+      const listener = (updatedId: number, info: chrome.tabs.TabChangeInfo) => {
+        if (updatedId === tabId && info.status === 'complete') finish();
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      try {
+        chrome.tabs.onUpdated.addListener(listener);
+      } catch {
+        finish();
+      }
+    });
+  }
 
   /**
    * Inject content script into tab

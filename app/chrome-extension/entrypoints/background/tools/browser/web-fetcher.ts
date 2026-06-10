@@ -69,15 +69,9 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
           await new Promise((resolve) => setTimeout(resolve, 3000));
         }
       } else {
-        // Use active tab (prefer specified window)
-        const tabs =
-          typeof windowId === 'number'
-            ? await chrome.tabs.query({ active: true, windowId })
-            : await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tabs[0]) {
-          return createErrorResponse('No active tab found');
-        }
-        tab = tabs[0];
+        // Target the single channel tab the agent drives (same tab navigate steers),
+        // so a read always reflects the page the agent just navigated to.
+        tab = await this.resolveTargetTab({ windowId });
       }
 
       if (!tab.id) {

@@ -21,8 +21,8 @@ class ScrollTool extends BaseBrowserToolExecutor {
   async execute(args: ScrollToolParams): Promise<ToolResult> {
     const { selector, direction = 'down', amount } = args;
     try {
-      const explicit = await this.tryGetTab(args.tabId);
-      const tab = explicit || (await this.getActiveTabOrThrowInWindow(args.windowId));
+      // Target the single channel tab the agent drives (same tab navigate steers).
+      const tab = await this.resolveTargetTab(args);
       if (!tab.id) {
         return createErrorResponse('Active tab has no ID');
       }
