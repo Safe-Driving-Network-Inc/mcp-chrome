@@ -28,23 +28,54 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
     if (m) return __kStripQuotes(m[1]);
     return null;
   }
-  function __kVisible(el) {
+  // Renderable = will actually be clickable once scrolled into view. Stricter than
+  // a size check (the previous bug): a hidden duplicate "Message" in a collapsed
+  // menu passed the old test, got picked, then the click step rejected it as "not
+  // visible" — wasting many turns. We do NOT require in-viewport here because the
+  // click step scrolls the element into view first.
+  function __kRenderable(el) {
     if (!el || !el.getBoundingClientRect) return false;
+    let style;
+    try {
+      style = window.getComputedStyle(el);
+    } catch (e) {
+      return false;
+    }
+    if (
+      !style ||
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      style.opacity === '0'
+    )
+      return false;
+    if (el.getAttribute && (el.getAttribute('aria-hidden') === 'true' || el.hasAttribute('hidden')))
+      return false;
     const r = el.getBoundingClientRect();
-    return (el.offsetParent !== null || r.width > 0 || r.height > 0) && r.width > 0 && r.height > 0;
+    return r.width > 0 && r.height > 0;
+  }
+  function __kInViewport(el) {
+    const r = el.getBoundingClientRect();
+    return r.bottom > 0 && r.top < window.innerHeight && r.right > 0 && r.left < window.innerWidth;
   }
   function __kName(el) {
     const aria = el.getAttribute && el.getAttribute('aria-label');
     return (aria && aria.trim()) || (el.textContent || '').trim();
   }
-  function __kPickInnermost(els) {
-    // Prefer the smallest matching element so we click the button, not a wrapper.
-    els.sort((a, b) => {
+  // From candidates, return the BEST clickable one: prefer those already in the
+  // viewport, then the smallest (most specific) — so we click the button, not a
+  // wrapper, and never a hidden duplicate.
+  function __kPickBest(els) {
+    const vis = els.filter(__kRenderable);
+    if (!vis.length) return null;
+    vis.sort((a, b) => {
+      const av = __kInViewport(a) ? 0 : 1;
+      const bv = __kInViewport(b) ? 0 : 1;
+      if (av !== bv) return av - bv;
       const ra = a.getBoundingClientRect();
       const rb = b.getBoundingClientRect();
       return ra.width * ra.height - rb.width * rb.height;
     });
-    return els[0];
+    return vis[0];
   }
   function __kFindByText(query) {
     const q = String(query).trim().toLowerCase();
@@ -52,20 +83,21 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
     const interactive =
       'a,button,[role="button"],[role="link"],[role="menuitem"],[role="tab"],' +
       'input[type="submit"],input[type="button"],[onclick],[tabindex]';
-    const candidates = Array.from(document.querySelectorAll(interactive)).filter(__kVisible);
-    let exact = candidates.filter((el) => __kName(el).toLowerCase() === q);
-    if (exact.length) return __kPickInnermost(exact);
-    let contains = candidates.filter((el) => __kName(el).toLowerCase().includes(q));
-    if (contains.length) return __kPickInnermost(contains);
-    // Fallback: any visible element whose own text matches → climb to a clickable ancestor.
+    const candidates = Array.from(document.querySelectorAll(interactive));
+    const exact = __kPickBest(candidates.filter((el) => __kName(el).toLowerCase() === q));
+    if (exact) return exact;
+    const contains = __kPickBest(candidates.filter((el) => __kName(el).toLowerCase().includes(q)));
+    if (contains) return contains;
+    // Fallback: any element whose own text matches → climb to a clickable ancestor.
     const all = Array.from(document.querySelectorAll('*')).filter(
-      (el) => __kVisible(el) && (el.textContent || '').trim().toLowerCase() === q,
+      (el) => (el.textContent || '').trim().toLowerCase() === q,
     );
+    const ancestors = [];
     for (const el of all) {
       const c = el.closest('a,button,[role="button"],[role="link"],[onclick]');
-      if (c && __kVisible(c)) return c;
+      if (c) ancestors.push(c);
     }
-    return null;
+    return __kPickBest(ancestors);
   }
   // Resolve a selector to an element, supporting text= targeting and never
   // throwing on an invalid CSS selector (returns null instead).
