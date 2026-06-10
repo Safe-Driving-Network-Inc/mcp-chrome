@@ -99,16 +99,62 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
     }
     return __kPickBest(ancestors);
   }
-  // Resolve a selector to an element, supporting text= targeting and never
-  // throwing on an invalid CSS selector (returns null instead).
-  function __kResolveElement(sel) {
-    const tq = __kParseTextQuery(sel);
-    if (tq != null) return __kFindByText(tq);
-    try {
-      return document.querySelector(sel);
-    } catch (e) {
-      return null;
+  // Ranked candidate LIST for a selector. The click step tries them in order and
+  // clicks the first that is genuinely clickable — so a single bad/hidden match
+  // (e.g. a "Message" duplicate) no longer dead-ends the action. For a text query
+  // we rank by match quality + visibility; for a CSS selector we return ALL
+  // matches (querySelectorAll) so an ambiguous selector also gets iterated.
+  function __kFindCandidates(query) {
+    const q = String(query).trim().toLowerCase();
+    if (!q) return [];
+    const interactive =
+      'a,button,[role="button"],[role="link"],[role="menuitem"],[role="tab"],' +
+      'input[type="submit"],input[type="button"],[onclick],[tabindex]';
+    const all = Array.from(document.querySelectorAll(interactive));
+    const exact = all.filter((el) => __kName(el).toLowerCase() === q);
+    const contains = all.filter(
+      (el) => __kName(el).toLowerCase() !== q && __kName(el).toLowerCase().includes(q),
+    );
+    const rank = (els) =>
+      els.filter(__kRenderable).sort((a, b) => {
+        const av = __kInViewport(a) ? 0 : 1;
+        const bv = __kInViewport(b) ? 0 : 1;
+        if (av !== bv) return av - bv;
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        return ra.width * ra.height - rb.width * rb.height;
+      });
+    let list = rank(exact).concat(rank(contains));
+    if (!list.length) {
+      // Fallback: any element whose own text matches → nearest clickable ancestor.
+      const textEls = Array.from(document.querySelectorAll('*')).filter(
+        (el) => (el.textContent || '').trim().toLowerCase() === q,
+      );
+      const anc = [];
+      for (const el of textEls) {
+        const c = el.closest('a,button,[role="button"],[role="link"],[onclick]');
+        if (c && anc.indexOf(c) === -1) anc.push(c);
+      }
+      list = rank(anc);
     }
+    return list;
+  }
+  function __kResolveCandidates(sel) {
+    const tq = __kParseTextQuery(sel);
+    if (tq != null) return __kFindCandidates(tq);
+    try {
+      return Array.from(document.querySelectorAll(sel));
+    } catch (e) {
+      return [];
+    }
+  }
+  window.__kResolveCandidates = __kResolveCandidates;
+  // Single-element resolve (used by fill-helper). First clickable candidate.
+  function __kResolveElement(sel) {
+    const list = __kResolveCandidates(sel);
+    if (!list.length) return null;
+    const vis = list.filter(__kRenderable);
+    return (vis.length ? vis : list)[0];
   }
   window.__kResolveElement = __kResolveElement;
   // ---------------------------------------------------------------------------
@@ -223,49 +269,53 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
           };
         }
       } else {
-        element = __kResolveElement(selector);
-        if (!element) {
+        // Try every matching candidate (text= ranked list, or all CSS matches)
+        // and click the FIRST that is actually clickable after scrolling it into
+        // view. One hidden/covered match no longer fails the whole action.
+        const candidates = __kResolveCandidates(selector);
+        if (!candidates.length) {
           return {
             error: `Element with selector "${selector}" not found`,
           };
         }
 
-        const rect = element.getBoundingClientRect();
-        elementInfo = {
-          tagName: element.tagName,
-          id: element.id,
-          className: element.className,
-          text: element.textContent?.trim().substring(0, 100) || '',
-          href: element.href || null,
-          type: element.type || null,
-          isVisible: true,
-          rect: {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.bottom,
-            left: rect.left,
-          },
-          clickMethod: 'selector',
-        };
+        for (const candidate of candidates) {
+          candidate.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          if (!isElementVisible(candidate)) continue; // try the next match
 
-        // First sroll so that the element is in view, then check visibility.
-        element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        elementInfo.isVisible = isElementVisible(element);
-        if (!elementInfo.isVisible) {
-          return {
-            error: `Element with selector "${selector}" is not visible`,
-            elementInfo,
+          element = candidate;
+          const rect = element.getBoundingClientRect();
+          elementInfo = {
+            tagName: element.tagName,
+            id: element.id,
+            className: element.className,
+            text: element.textContent?.trim().substring(0, 100) || '',
+            href: element.href || null,
+            type: element.type || null,
+            isVisible: true,
+            rect: {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+              left: rect.left,
+            },
+            clickMethod: 'selector',
           };
+          clickX = rect.left + rect.width / 2;
+          clickY = rect.top + rect.height / 2;
+          break;
         }
 
-        const updatedRect = element.getBoundingClientRect();
-        clickX = updatedRect.left + updatedRect.width / 2;
-        clickY = updatedRect.top + updatedRect.height / 2;
+        if (!element) {
+          return {
+            error: `Element with selector "${selector}" is not visible`,
+          };
+        }
       }
 
       let navigationPromise;
