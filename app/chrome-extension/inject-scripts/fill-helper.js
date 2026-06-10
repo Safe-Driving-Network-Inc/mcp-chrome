@@ -6,6 +6,46 @@ if (window.__FILL_HELPER_INITIALIZED__) {
   // Already initialized, skip
 } else {
   window.__FILL_HELPER_INITIALIZED__ = true;
+
+  // Resolve a fill target when the caller gives no selector/ref: prefer the
+  // currently focused editable element; else the single visible editable box on
+  // the page (input/textarea/contenteditable/[role=textbox]). Matches the common
+  // case of a compose field that auto-focuses, so the agent can "just type".
+  function __kResolveFillTarget() {
+    const fillable = (el) => {
+      if (!el || el.nodeType !== 1) return false;
+      const tag = el.tagName;
+      if (tag === 'TEXTAREA') return true;
+      if (tag === 'INPUT') {
+        const t = (el.getAttribute('type') || 'text').toLowerCase();
+        return !['hidden', 'submit', 'button', 'checkbox', 'radio', 'file', 'image'].includes(t);
+      }
+      return el.isContentEditable || el.getAttribute('role') === 'textbox';
+    };
+    const visible = (el) => {
+      let s;
+      try {
+        s = window.getComputedStyle(el);
+      } catch (e) {
+        return false;
+      }
+      if (!s || s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
+        return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    };
+    // 1. focused element
+    const active = document.activeElement;
+    if (active && fillable(active) && visible(active)) return active;
+    // 2. single visible editable box (prefer a message compose field)
+    const all = Array.from(
+      document.querySelectorAll('textarea, input, [contenteditable="true"], [role="textbox"]'),
+    ).filter((el) => fillable(el) && visible(el));
+    if (!all.length) return null;
+    const compose = all.find((el) => /msg-form|compose|message/i.test(el.className || ''));
+    return compose || all[0];
+  }
+
   /**
    * Fill an input element with the specified value
    * @param {string} selector - CSS selector for the element to fill
@@ -29,7 +69,7 @@ if (window.__FILL_HELPER_INITIALIZED__) {
             error: `Element ref "${ref}" not found. Please call chrome_read_page first and ensure the ref is still valid.`,
           };
         }
-      } else {
+      } else if (selector) {
         // Reuse click-helper's text-aware resolver when present (supports
         // text=Label targeting); otherwise resolve safely without throwing on an
         // invalid CSS selector.
@@ -43,12 +83,17 @@ if (window.__FILL_HELPER_INITIALIZED__) {
                   return null;
                 }
               })();
+      } else {
+        // No selector and no ref: target the focused editable element, else the
+        // single obvious editable box (e.g. a message compose field that
+        // auto-focuses). Lets the agent "just type into the focused box".
+        element = __kResolveFillTarget();
       }
       if (!element) {
         return {
           error: selector
             ? `Element with selector "${selector}" not found`
-            : `Element for ref not found`,
+            : `No selector given and no focused/visible editable field was found`,
         };
       }
 
