@@ -2731,53 +2731,57 @@ if (window.__WEB_FETCHER_HELPER_INITIALIZED__) {
               selector: request.selector,
             });
           } else {
-            throw new Error(`No element found matching selector: ${request.selector}`);
+            // Selector didn't match — LinkedIn and other apps use hashed/dynamic
+            // class names, so a guessed selector often misses. Don't dead-end the
+            // agent with a hard error; return the full visible page text instead.
+            sendResponse({
+              success: true,
+              textContent: cleanContent(document.body ? document.body.innerText : ''),
+              selector: request.selector,
+              selectorMatched: false,
+            });
           }
         } else {
-          // Otherwise use Readability to extract the main content
-          const documentClone = document.cloneNode(true);
+          // Attended automation: the agent needs the page's ACTUAL visible text
+          // (search results, lists, app UI), NOT Readability "reader mode".
+          // Readability is built for article/blog pages; on SPA/list pages
+          // (LinkedIn search/feed/messaging) it picks the wrong "article" (e.g. an
+          // ad-feedback overlay) and discards the results the agent must see. So
+          // return document.body.innerText as the primary content, and attach
+          // Readability's article only as optional metadata for genuine articles.
+          const bodyText = cleanContent(document.body ? document.body.innerText : '');
 
-          const reader = new Readability(documentClone);
-          const article = reader.parse();
-
-          if (article && article.textContent) {
-            // Get metadata
-            const metadata = extractPageMetadata();
-
-            // Get iframe content if available
-            const iframeContent = extractIframeContent();
-
-            // Combine content
-            let fullContent = article.textContent;
-            if (iframeContent && iframeContent.trim().length > config.minTextLength) {
-              fullContent += '\n\n--- Embedded Content ---\n\n' + iframeContent;
-            }
-
-            // Clean content
-            fullContent = cleanContent(fullContent);
-
-            sendResponse({
-              success: true,
-              textContent: fullContent,
-              article: {
-                title: article.title,
-                byline: article.byline,
-                siteName: article.siteName,
-                excerpt: article.excerpt,
-                lang: article.lang,
-                content: article.content, // HTML content
-              },
-              metadata: metadata,
-            });
-          } else {
-            // Fallback to basic extraction
-            const textContent = document.body.innerText;
-            sendResponse({
-              success: true,
-              textContent: textContent,
-              fallback: true,
-            });
+          // Append iframe content if present.
+          const iframeContent = extractIframeContent();
+          let fullContent = bodyText;
+          if (iframeContent && iframeContent.trim().length > config.minTextLength) {
+            fullContent += '\n\n--- Embedded Content ---\n\n' + iframeContent;
           }
+
+          // Best-effort Readability extraction for real article pages. Never let
+          // it replace the body text or throw.
+          let article = undefined;
+          try {
+            const parsed = new Readability(document.cloneNode(true)).parse();
+            if (parsed) {
+              article = {
+                title: parsed.title,
+                byline: parsed.byline,
+                siteName: parsed.siteName,
+                excerpt: parsed.excerpt,
+                lang: parsed.lang,
+              };
+            }
+          } catch (e) {
+            /* body text is authoritative — ignore reader-mode failures */
+          }
+
+          sendResponse({
+            success: true,
+            textContent: fullContent,
+            article: article,
+            metadata: extractPageMetadata(),
+          });
         }
       } catch (error) {
         console.error('Error extracting text content:', error);
