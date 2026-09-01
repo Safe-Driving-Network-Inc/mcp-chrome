@@ -133,7 +133,7 @@ export interface StepAssert extends StepBase {
     | { visible: string }
     | { textPresent: string }
     | { attribute: { selector: string; name: string; equals?: string; matches?: string } };
-  // 失败策略：stop=失败即停（默认）、warn=仅告警并继续、retry=触发重试机制
+  // Failure policy: stop = halt on failure (default), warn = warn and continue, retry = kick off the retry mechanism
   failStrategy?: 'stop' | 'warn' | 'retry';
 }
 

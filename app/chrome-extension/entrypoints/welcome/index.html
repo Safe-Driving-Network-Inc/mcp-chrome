@@ -3,8 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Welcome to Chrome MCP Server</title>
+    <title>Welcome to the Kareenos Extension</title>
     <meta name="manifest.type" content="unlisted_page" />
+    <!-- Brand v5 ground painted on the shell so the first frame is never a
+         white flash before the Vue app's own background lands. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #f7f8fb;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>

@@ -1144,7 +1144,7 @@ export const TOOL_SCHEMAS: Tool[] = [
   {
     name: TOOL_NAMES.BROWSER.FILE_UPLOAD,
     description:
-      'Upload files to web forms with file input elements using Chrome DevTools Protocol',
+      'Upload a file into the page: assigns it to a file input via DataTransfer (dispatching input/change), or simulates a drag-and-drop when the target is a drop zone. Bytes are provided as base64 by the caller — this tool never fetches URLs or reads local paths.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1155,30 +1155,23 @@ export const TOOL_SCHEMAS: Tool[] = [
         },
         selector: {
           type: 'string',
-          description: 'CSS selector for the file input element (input[type="file"])',
-        },
-        filePath: {
-          type: 'string',
-          description: 'Local file path to upload',
-        },
-        fileUrl: {
-          type: 'string',
-          description: 'URL to download file from before uploading',
+          description:
+            'The upload control: CSS selector or text=<label> / :has-text(<label>). The tool resolves the associated input[type="file"] (including hidden ones) and falls back to a simulated drop.',
         },
         base64Data: {
           type: 'string',
-          description: 'Base64 encoded file data to upload',
+          description: 'Base64 encoded file bytes to upload',
         },
         fileName: {
           type: 'string',
-          description: 'Optional filename when using base64 or URL (default: "uploaded-file")',
+          description: 'Filename presented to the website (default: "uploaded-file")',
         },
-        multiple: {
-          type: 'boolean',
-          description: 'Whether the input accepts multiple files (default: false)',
+        mimeType: {
+          type: 'string',
+          description: 'MIME type of the file (default: "application/octet-stream")',
         },
       },
-      required: ['selector'],
+      required: ['selector', 'base64Data'],
     },
   },
   {

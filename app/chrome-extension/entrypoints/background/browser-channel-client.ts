@@ -45,7 +45,11 @@ let state: ConnState = 'disconnected';
 function setState(s: ConnState) {
   state = s;
   // Surface to the popup (best effort) so the UI reflects connection status.
-  try { chrome.runtime.sendMessage({ type: 'browser_channel_state', state: s }).catch?.(() => {}); } catch (e) { /* no popup open */ }
+  try {
+    chrome.runtime.sendMessage({ type: 'browser_channel_state', state: s }).catch?.(() => {});
+  } catch (e) {
+    /* no popup open */
+  }
 }
 
 export function getBrowserChannelState(): ConnState {
@@ -67,7 +71,16 @@ async function getToken(): Promise<string | null> {
 async function storeSignIn(msg: any): Promise<void> {
   await chrome.storage.session.set({ [TOKEN_KEY]: msg.token });
   await chrome.storage.local.set({
-    kareenos_bound: { projectid: msg.projectid || null, accountid: msg.accountid || null, session_id: msg.session_id || null },
+    kareenos_bound: {
+      projectid: msg.projectid || null,
+      accountid: msg.accountid || null,
+      userid: msg.userid || null,
+      session_id: msg.session_id || null,
+      // Readable labels for the popup (fall back to ids when absent).
+      project_name: msg.project_name || null,
+      account_name: msg.account_name || null,
+      user_name: msg.user_name || null,
+    },
   });
 }
 
@@ -82,24 +95,63 @@ async function getServerUrl(): Promise<string> {
 
 function send(obj: any) {
   if (socket && socket.readyState === WebSocket.OPEN) {
-    try { socket.send(JSON.stringify(obj)); } catch (e) { /* ignore */ }
+    try {
+      socket.send(JSON.stringify(obj));
+    } catch (e) {
+      /* ignore */
+    }
+  }
+}
+
+// Upstream frames that are NOT command results (today: Learn Mode's
+// 'macro_recorded'). Unlike send(), reports whether the frame actually left —
+// callers keep their payload queued (outbox) when the socket isn't bound yet.
+export function sendUpstreamFrame(obj: any): boolean {
+  if (!bound || !socket || socket.readyState !== WebSocket.OPEN) return false;
+  try {
+    socket.send(JSON.stringify(obj));
+    return true;
+  } catch (e) {
+    return false;
   }
 }
 
 // Execute one command: map action → tool, run it, adapt the result, reply.
-async function handleCommand(cmd: CommandEnvelope) {
-  if (!cmd || !cmd.command_id) return;
-  if (!isSupportedAction(cmd.action)) {
-    send({ type: 'result', ...failureEnvelope(cmd, 'UNSUPPORTED_ACTION', 'Unsupported action: ' + cmd.action) });
-    return;
-  }
+async function executeCommand(cmd: CommandEnvelope) {
   try {
-    const call = resolveToolCall(cmd.action, cmd.args || {});
+    const call = resolveToolCall(cmd);
     const toolResult = await handleCallTool({ name: call.name, args: call.args });
     send({ type: 'result', ...toResultEnvelope(cmd.action, cmd, toolResult as any) });
   } catch (e: any) {
-    send({ type: 'result', ...failureEnvelope(cmd, 'EXECUTION_ERROR', (e && e.message) || 'Tool execution failed') });
+    send({
+      type: 'result',
+      ...failureEnvelope(cmd, 'EXECUTION_ERROR', (e && e.message) || 'Tool execution failed'),
+    });
   }
+}
+
+// Per-lane serialization: commands WITHIN one lane run strictly in order (a
+// lane's click must see its own navigate's page), while different lanes run
+// CONCURRENTLY — that is the whole point of multi-lane. The map holds each
+// lane's tail promise; in-memory only (in-flight commands don't survive an MV3
+// SW eviction anyway — the server times out and tells the agent).
+const laneTails = new Map<string, Promise<void>>();
+
+function handleCommand(cmd: CommandEnvelope) {
+  if (!cmd || !cmd.command_id) return;
+  if (!isSupportedAction(cmd.action)) {
+    send({
+      type: 'result',
+      ...failureEnvelope(cmd, 'UNSUPPORTED_ACTION', 'Unsupported action: ' + cmd.action),
+    });
+    return;
+  }
+  const laneId = cmd.lane_id || 'default';
+  const tail = (laneTails.get(laneId) || Promise.resolve()).then(() => executeCommand(cmd));
+  laneTails.set(laneId, tail);
+  tail.finally(() => {
+    if (laneTails.get(laneId) === tail) laneTails.delete(laneId);
+  });
 }
 
 async function connect() {
@@ -128,14 +180,33 @@ async function connect() {
   };
   socket.onmessage = (ev) => {
     let frame: any;
-    try { frame = JSON.parse(typeof ev.data === 'string' ? ev.data : ''); } catch (e) { return; }
+    try {
+      frame = JSON.parse(typeof ev.data === 'string' ? ev.data : '');
+    } catch (e) {
+      return;
+    }
     switch (frame.type) {
       case 'bind_ack':
-        if (frame.ok) { bound = true; setState('bound'); }
-        else { bound = false; setState('error'); try { socket?.close(); } catch (e) {} }
+        if (frame.ok) {
+          bound = true;
+          setState('bound');
+          // We are live: flush any Learn Mode macros recorded while offline.
+          // Dynamic import — learn-mode statically imports this module.
+          import('./learn-mode').then((m) => m.drainMacroOutbox()).catch(() => {});
+        } else {
+          bound = false;
+          setState('error');
+          try {
+            socket?.close();
+          } catch (e) {}
+        }
         break;
       case 'command':
         if (bound) handleCommand(frame as CommandEnvelope);
+        break;
+      case 'macro_ack':
+        // Server verdict for a Learn Mode macro: dequeue + notify the popup.
+        import('./learn-mode').then((m) => m.handleMacroAck(frame)).catch(() => {});
         break;
       case 'pong':
         break;
@@ -143,19 +214,35 @@ async function connect() {
         break; // never treat anything else as a command
     }
   };
-  socket.onclose = () => { socket = null; bound = false; connecting = false; if (state !== 'error') setState('disconnected'); };
-  socket.onerror = () => { setState('error'); };
+  socket.onclose = () => {
+    socket = null;
+    bound = false;
+    connecting = false;
+    if (state !== 'error') setState('disconnected');
+  };
+  socket.onerror = () => {
+    setState('error');
+  };
 }
 
 function disconnect() {
-  try { socket?.close(); } catch (e) {}
-  socket = null; bound = false; connecting = false;
+  try {
+    socket?.close();
+  } catch (e) {}
+  socket = null;
+  bound = false;
+  connecting = false;
   setState('disconnected');
 }
 
 // Public: called by the popup after sign-in stores a fresh token, or on Disconnect.
-export async function reconnectBrowserChannel() { disconnect(); await connect(); }
-export function disconnectBrowserChannel() { disconnect(); }
+export async function reconnectBrowserChannel() {
+  disconnect();
+  await connect();
+}
+export function disconnectBrowserChannel() {
+  disconnect();
+}
 
 export function initBrowserChannelClient() {
   // Heartbeat: re-check the connection every minute (MV3 alarms min period).
@@ -165,7 +252,9 @@ export function initBrowserChannelClient() {
     chrome.alarms.onAlarm.addListener((alarm) => {
       if (alarm.name === ALARM_NAME) connect();
     });
-  } catch (e) { /* alarms unavailable in some contexts */ }
+  } catch (e) {
+    /* alarms unavailable in some contexts */
+  }
 
   // React to sign-in (token written to session storage) without waiting for the alarm.
   try {
@@ -175,7 +264,9 @@ export function initBrowserChannelClient() {
         else disconnect();
       }
     });
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    /* ignore */
+  }
 
   // Control + sign-in messages. `browser_channel_signin` is sent either by the
   // popup, by a content script relaying a window postMessage from the Kareenos
@@ -185,26 +276,45 @@ export function initBrowserChannelClient() {
   try {
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (!msg || !msg.type) return;
-      if (msg.type === 'browser_channel_get_state') { sendResponse({ state }); return; }
-      if (msg.type === 'browser_channel_reconnect') { reconnectBrowserChannel(); sendResponse({ ok: true }); return; }
-      if (msg.type === 'browser_channel_disconnect') { disconnectBrowserChannel(); sendResponse({ ok: true }); return; }
+      if (msg.type === 'browser_channel_get_state') {
+        sendResponse({ state });
+        return;
+      }
+      if (msg.type === 'browser_channel_reconnect') {
+        reconnectBrowserChannel();
+        sendResponse({ ok: true });
+        return;
+      }
+      if (msg.type === 'browser_channel_disconnect') {
+        disconnectBrowserChannel();
+        sendResponse({ ok: true });
+        return;
+      }
       if (msg.type === 'browser_channel_signin' && msg.token) {
-        storeSignIn(msg).then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ ok: false, error: e?.message }));
+        storeSignIn(msg)
+          .then(() => sendResponse({ ok: true }))
+          .catch((e) => sendResponse({ ok: false, error: e?.message }));
         return true; // async response
       }
     });
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    /* ignore */
+  }
 
   // Direct sign-in from the Kareenos connect page via externally_connectable
   // (parallel to the content-script relay). Same payload, same handler.
   try {
     chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
       if (msg && msg.type === 'browser_channel_signin' && msg.token) {
-        storeSignIn(msg).then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ ok: false, error: e?.message }));
+        storeSignIn(msg)
+          .then(() => sendResponse({ ok: true }))
+          .catch((e) => sendResponse({ ok: false, error: e?.message }));
         return true;
       }
     });
-  } catch (e) { /* ignore */ }
+  } catch (e) {
+    /* ignore */
+  }
 
   // Attempt an initial connection on spin-up.
   connect();

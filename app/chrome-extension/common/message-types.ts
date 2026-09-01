@@ -133,6 +133,7 @@ export const TOOL_MESSAGE_TYPES = {
   // User interactions
   CLICK_ELEMENT: 'clickElement',
   FILL_ELEMENT: 'fillElement',
+  UPLOAD_FILE: 'uploadFile',
   SIMULATE_KEYBOARD: 'simulateKeyboard',
 
   // Interactive elements

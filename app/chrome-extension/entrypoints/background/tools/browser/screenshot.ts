@@ -55,6 +55,7 @@ interface ScreenshotToolParams {
   fullPage?: boolean;
   savePng?: boolean;
   maxHeight?: number; // Maximum height to capture in pixels (for infinite scroll pages)
+  laneId?: string; // which lane's tab to capture
 }
 
 /** Page details returned by screenshot-helper content script */
@@ -147,10 +148,13 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
 
     try {
       const background = args.background === true;
-      // CDP path: background=true with simple viewport capture (no fullPage, no selector)
-      const canUseCdpCapture = background && !fullPage && !selector;
+      // CDP path: capture the channel tab via Page.captureScreenshot WITHOUT
+      // activating it (works on a fully background tab). Handles viewport, element
+      // (selector → clip) and full page (captureBeyondViewport → content clip), so
+      // the agent never has to bring the tab to the foreground to be screenshotted.
+      const canUseCdpCapture = background && tab.id != null;
 
-      // === Path 1: CDP viewport capture (no content script needed) ===
+      // === Path 1: CDP capture (no content script, works on a background tab) ===
       if (canUseCdpCapture) {
         try {
           const tabId = tab.id!;
@@ -161,26 +165,75 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
               'Page.getLayoutMetrics',
               {},
             );
-            const viewport = metrics?.layoutViewport ||
-              metrics?.visualViewport || {
-                clientWidth: 800,
-                clientHeight: 600,
-                pageX: 0,
-                pageY: 0,
+            const viewport = metrics?.cssLayoutViewport ||
+              metrics?.layoutViewport ||
+              metrics?.visualViewport || { clientWidth: 800, clientHeight: 600 };
+            const content = metrics?.cssContentSize || metrics?.contentSize;
+
+            const shotParams: any = { format: 'png', captureBeyondViewport: true };
+            let widthCss: number;
+            let heightCss: number;
+
+            if (selector) {
+              // Resolve the element's page-relative rect (scrolling it into view).
+              // executeScript targets the tab by id — runs on a background tab too.
+              const injected = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: (sel: string) => {
+                  const el = document.querySelector(sel) as HTMLElement | null;
+                  if (!el) return null;
+                  el.scrollIntoView({ block: 'center', inline: 'center' });
+                  const r = el.getBoundingClientRect();
+                  return {
+                    x: r.left + window.scrollX,
+                    y: r.top + window.scrollY,
+                    width: r.width,
+                    height: r.height,
+                  };
+                },
+                args: [selector],
+              });
+              const rect = injected && injected[0] && (injected[0] as any).result;
+              if (!rect || !rect.width || !rect.height) {
+                throw new Error(`Element not found / not visible for selector: ${selector}`);
+              }
+              shotParams.clip = {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                scale: 1,
               };
-            const shot: any = await cdpSessionManager.sendCommand(tabId, 'Page.captureScreenshot', {
-              format: 'png',
-            });
+              widthCss = Math.round(rect.width);
+              heightCss = Math.round(rect.height);
+            } else if (fullPage) {
+              const w = Math.ceil((content && content.width) || viewport.clientWidth || 800);
+              const h = Math.ceil((content && content.height) || viewport.clientHeight || 600);
+              shotParams.clip = { x: 0, y: 0, width: w, height: h, scale: 1 };
+              widthCss = w;
+              heightCss = h;
+            } else {
+              // Current viewport only.
+              shotParams.captureBeyondViewport = false;
+              widthCss = Math.round(viewport.clientWidth || 800);
+              heightCss = Math.round(viewport.clientHeight || 600);
+            }
+
+            const shot: any = await cdpSessionManager.sendCommand(
+              tabId,
+              'Page.captureScreenshot',
+              shotParams,
+            );
             const base64Data = typeof shot?.data === 'string' ? shot.data : '';
             if (!base64Data) {
               throw new Error('CDP Page.captureScreenshot returned empty data');
             }
             finalImageDataUrl = `data:image/png;base64,${base64Data}`;
-            finalImageWidthCss = Math.round(viewport.clientWidth || 800);
-            finalImageHeightCss = Math.round(viewport.clientHeight || 600);
+            finalImageWidthCss = widthCss;
+            finalImageHeightCss = heightCss;
           });
         } catch (e) {
-          console.warn('CDP viewport capture failed, falling back to helper path:', e);
+          console.warn('CDP capture failed, falling back to helper path:', e);
         }
       }
 

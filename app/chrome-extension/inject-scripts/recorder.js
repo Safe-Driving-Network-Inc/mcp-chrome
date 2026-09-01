@@ -50,9 +50,15 @@
         else candidates.push({ type: 'aria', value: `textbox[name=${aria}]` });
       }
       const tag = el.tagName?.toLowerCase?.() || '';
-      if (['button', 'a', 'summary'].includes(tag)) {
-        const text = (el.textContent || '').trim();
-        if (text) candidates.push({ type: 'text', value: text.substring(0, 64) });
+      // Text anchor: real buttons/links, but ALSO role-based controls — modern
+      // obfuscated-class UIs (LinkedIn) render buttons as <div role="button">,
+      // where the visible label is the ONLY stable anchor across sessions.
+      const clickableTag = ['button', 'a', 'summary', 'label', 'option'].includes(tag);
+      const clickableRole = ['button', 'link', 'menuitem', 'tab', 'option'].includes(role || '');
+      if (clickableTag || clickableRole) {
+        const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+        if (text && text.length <= 80)
+          candidates.push({ type: 'text', value: text.substring(0, 64) });
       }
       const selector = SelectorEngine._choosePrimary(el, candidates);
       return { selector, candidates, tag };
@@ -202,16 +208,16 @@
       });
       root.innerHTML = `
         <div id="__rr_rec_panel" style="background: rgba(220,38,38,0.95); color: #fff; padding:8px 10px; border-radius:8px; display:flex; align-items:center; gap:8px; box-shadow:0 4px 16px rgba(0,0,0,0.2);">
-          <span id="__rr_badge" style="font-weight:600;">录制中</span>
+          <span id="__rr_badge" style="font-weight:600;">Recording</span>
           <label style="display:inline-flex; align-items:center; gap:4px; font-size:12px;">
-            <input id="__rr_hide_values" type="checkbox" style="vertical-align:middle;" />隐藏输入值
+            <input id="__rr_hide_values" type="checkbox" style="vertical-align:middle;" />Hide input values
           </label>
           <label style="display:inline-flex; align-items:center; gap:4px; font-size:12px;">
-            <input id="__rr_enable_highlight" type="checkbox" style="vertical-align:middle;" />高亮
+            <input id="__rr_enable_highlight" type="checkbox" style="vertical-align:middle;" />Highlight
           </label>
-          <button id="__rr_toggle_timeline" style="background:transparent; color:#fff; border:1px solid rgba(255,255,255,0.5); border-radius:6px; padding:2px 6px; cursor:pointer; font-size:12px;">折叠</button>
-          <button id="__rr_pause" style="background:#fff; color:#111; border:none; border-radius:6px; padding:4px 8px; cursor:pointer;">暂停</button>
-          <button id="__rr_stop" style="background:#111; color:#fff; border:none; border-radius:6px; padding:4px 8px; cursor:pointer;">停止</button>
+          <button id="__rr_toggle_timeline" style="background:transparent; color:#fff; border:1px solid rgba(255,255,255,0.5); border-radius:6px; padding:2px 6px; cursor:pointer; font-size:12px;">Collapse</button>
+          <button id="__rr_pause" style="background:#fff; color:#111; border:none; border-radius:6px; padding:4px 8px; cursor:pointer;">Pause</button>
+          <button id="__rr_stop" style="background:#111; color:#fff; border:none; border-radius:6px; padding:4px 8px; cursor:pointer;">Stop</button>
         </div>`;
       document.documentElement.appendChild(root);
       // Build timeline container just below the panel
@@ -232,7 +238,7 @@
         lineHeight: '1.4',
       });
       const header = document.createElement('div');
-      header.textContent = '已录制步骤';
+      header.textContent = 'Recorded steps';
       header.style.opacity = '0.8';
       header.style.marginBottom = '4px';
       const list = document.createElement('ol');
@@ -265,7 +271,7 @@
           this._collapsed = !this._collapsed;
           if (this._timelineBox)
             this._timelineBox.style.display = this._collapsed ? 'none' : 'block';
-          btnToggle.textContent = this._collapsed ? '展开' : '折叠';
+          btnToggle.textContent = this._collapsed ? 'Expand' : 'Collapse';
         });
       }
       btnPause.addEventListener('click', () => {
@@ -301,8 +307,8 @@
     updateStatus() {
       const badge = document.getElementById('__rr_badge');
       const pauseBtn = document.getElementById('__rr_pause');
-      if (badge) badge.textContent = this.recorder.isPaused ? '已暂停' : '录制中';
-      if (pauseBtn) pauseBtn.textContent = this.recorder.isPaused ? '继续' : '暂停';
+      if (badge) badge.textContent = this.recorder.isPaused ? 'Paused' : 'Recording';
+      if (pauseBtn) pauseBtn.textContent = this.recorder.isPaused ? 'Resume' : 'Pause';
     }
 
     // Reset the timeline list content
@@ -421,30 +427,30 @@
     // Create a short, human-readable text for a recorded step
     _formatStepText(step, _idx) {
       try {
-        if (!step || typeof step !== 'object') return '未知步骤';
+        if (!step || typeof step !== 'object') return 'Unknown step';
         const t = step.type;
         const sel = step.target && step.target.selector ? step.target.selector : '';
         if (t === 'click' || t === 'dblclick') {
-          return `${t === 'dblclick' ? '双击' : '点击'}: ${sel || '(document)'}`;
+          return `${t === 'dblclick' ? 'Double click' : 'Click'}: ${sel || '(document)'}`;
         }
         if (t === 'fill') {
           const val = step.value;
           const shown = typeof val === 'string' && val.length > 0 ? val : String(val);
-          return `输入: ${sel} = ${shown}`;
+          return `Input: ${sel} = ${shown}`;
         }
         if (t === 'scroll') {
-          const mode = step.mode === 'container' ? '容器' : '页面';
+          const mode = step.mode === 'container' ? 'container' : 'page';
           const off = step.offset || {};
-          return `滚动(${mode}): y=${off.y ?? 0}, x=${off.x ?? 0}`;
+          return `Scroll (${mode}): y=${off.y ?? 0}, x=${off.x ?? 0}`;
         }
-        if (t === 'openTab') return `打开标签页: ${step.url || ''}`;
-        if (t === 'switchTab') return `切换标签页: 包含 ${step.urlContains || ''}`;
+        if (t === 'openTab') return `Open tab: ${step.url || ''}`;
+        if (t === 'switchTab') return `Switch tab: contains ${step.urlContains || ''}`;
         if (t === 'switchFrame')
-          return `切换Frame: 包含 ${step.frame && step.frame.urlContains ? step.frame.urlContains : ''}`;
-        if (t === 'waitFor') return `等待: ${sel || step.until || ''}`;
+          return `Switch frame: contains ${step.frame && step.frame.urlContains ? step.frame.urlContains : ''}`;
+        if (t === 'waitFor') return `Wait: ${sel || step.until || ''}`;
         return `${t}`;
       } catch (_) {
-        return '步骤';
+        return 'Step';
       }
     }
   }
@@ -508,6 +514,8 @@
       this._lastKeyTs = 0;
       // Map to avoid duplicate switchFrame per iframe source (keyed by frame selector)
       this._frameSwitchMap = new Set();
+      // Open shadow roots we've attached composed:false listeners to (change/input)
+      this._instrumentedRoots = new WeakSet();
     }
 
     // Lifecycle
@@ -878,7 +886,7 @@
       const nowIso = new Date().toISOString();
       return {
         id: `flow_${Date.now()}`,
-        name: '未命名录制',
+        name: 'Untitled recording',
         version: 1,
         steps: [],
         variables: [],
@@ -1208,9 +1216,41 @@
     _pendingClickTimer = null;
     _DBLCLICK_THRESHOLD_MS = 300;
 
+    // Shadow DOM retargeting: a document-level listener sees events from inside
+    // a shadow root RETARGETED to the host element (LinkedIn's whole composer is
+    // one #interop-outlet host — every inner click recorded as the same useless
+    // node). composedPath()[0] is the true target for OPEN shadow roots.
+    _realTarget(e) {
+      try {
+        const p = typeof e.composedPath === 'function' ? e.composedPath() : null;
+        if (p && p.length && p[0] instanceof Element) return p[0];
+      } catch {}
+      return e.target instanceof Element ? e.target : null;
+    }
+
+    // 'change' is composed:false — it NEVER reaches a document listener from
+    // inside a shadow root (this is why a file pick in LinkedIn's composer was
+    // never recorded). Lazily attach a change listener to every open shadow
+    // root we see in any composed event's path.
+    _instrumentShadowRoots(e) {
+      try {
+        const p = typeof e.composedPath === 'function' ? e.composedPath() : null;
+        if (!p) return;
+        for (let i = 0; i < p.length; i++) {
+          const n = p[i];
+          if (n instanceof ShadowRoot && !this._instrumentedRoots.has(n)) {
+            this._instrumentedRoots.add(n);
+            n.addEventListener('change', this._onChange, true);
+            n.addEventListener('input', this._onDocInput, true);
+          }
+        }
+      } catch {}
+    }
+
     _onClick(e) {
       if (!this.isRecording || this.isPaused) return;
-      const el = e.target instanceof Element ? e.target : null;
+      this._instrumentShadowRoots(e);
+      const el = this._realTarget(e);
       if (!el) return;
       try {
         if (el instanceof HTMLInputElement) {
@@ -1237,9 +1277,23 @@
         }
       } catch {}
 
-      const target = SelectorEngine.buildTarget(el);
+      // Record the semantic control, not the wrapper: the event target is often
+      // an inner span/div inside the real button (obfuscated-class UIs have
+      // NOTHING stable on the inner node). Climbing to the nearest clickable
+      // ancestor gives buildTarget its aria-label / role / visible text.
+      let clickEl = el;
       try {
-        const gref = SelectorEngine._ensureGlobalRef && SelectorEngine._ensureGlobalRef(el);
+        const clickable =
+          el.closest &&
+          el.closest(
+            'button, a, summary, label, input, select, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [role="checkbox"], [role="radio"], [aria-label]',
+          );
+        if (clickable) clickEl = clickable;
+      } catch {}
+
+      const target = SelectorEngine.buildTarget(clickEl);
+      try {
+        const gref = SelectorEngine._ensureGlobalRef && SelectorEngine._ensureGlobalRef(clickEl);
         if (gref) target.ref = gref;
       } catch {}
 
@@ -1460,7 +1514,7 @@
 
     _onChange(e) {
       if (!this.isRecording || this.isPaused) return;
-      const el = e.target;
+      const el = this._realTarget(e);
       if (el instanceof HTMLSelectElement) {
         const val = el.value;
         const nowTs = Date.now();
@@ -1511,7 +1565,17 @@
         if (tt === 'file') {
           const varKey = el.name ? el.name : `file_${Math.random().toString(36).slice(2, 6)}`;
           this._addVariable(varKey, false, '');
-          this._pushStep({ type: 'fill', target, value: `{${varKey}}`, screenshotOnFail: true });
+          // Keep the picked file's identity (name/type/size — never bytes) so a
+          // Learn Mode macro can describe WHAT was uploaded; replay substitutes
+          // a real file via the platform's upload path.
+          const f = el.files && el.files[0];
+          this._pushStep({
+            type: 'fill',
+            target,
+            value: `{${varKey}}`,
+            file: f ? { name: f.name || '', mime: f.type || '', size: f.size || 0 } : undefined,
+            screenshotOnFail: true,
+          });
           return;
         }
       }
@@ -1534,7 +1598,8 @@
 
     _onFocusIn(e) {
       if (!this.isRecording || this.isPaused) return;
-      const el = e.target;
+      this._instrumentShadowRoots(e);
+      const el = this._realTarget(e);
       const isEditable =
         el instanceof HTMLInputElement ||
         el instanceof HTMLTextAreaElement ||
@@ -1859,6 +1924,9 @@
             }
           }
         }
+        // Preserve the child frame's URL: replay tools search child frames, and
+        // Learn Mode macros surface "(inside child frame: …)" from this field.
+        if (href && !step.frameHref) step.frameHref = String(href).slice(0, 500);
         this._pushStep(step);
       } catch {}
     }

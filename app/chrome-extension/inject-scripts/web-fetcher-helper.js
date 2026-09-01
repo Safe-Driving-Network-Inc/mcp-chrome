@@ -165,8 +165,8 @@ if (window.__WEB_FETCHER_HELPER_INITIALIZED__) {
       jsonLdArticleTypes:
         /^Article|AdvertiserContentArticle|NewsArticle|AnalysisNewsArticle|AskPublicNewsArticle|BackgroundNewsArticle|OpinionNewsArticle|ReportageNewsArticle|ReviewNewsArticle|Report|SatiricalArticle|ScholarlyArticle|MedicalScholarlyArticle|SocialMediaPosting|BlogPosting|LiveBlogPosting|DiscussionForumPosting|TechArticle|APIReference$/,
       // used to see if a node's content matches words commonly used for ad blocks or loading indicators
-      adWords: /^(ad(vertising|vertisement)?|pub(licité)?|werb(ung)?|广告|Реклама|Anuncio)$/iu,
-      loadingWords: /^((loading|正在加载|Загрузка|chargement|cargando)(…|\.\.\.)?)$/iu,
+      adWords: /^(ad(vertising|vertisement)?|pub(licité)?|werb(ung)?|Реклама|Anuncio)$/iu,
+      loadingWords: /^((loading|Загрузка|chargement|cargando)(…|\.\.\.)?)$/iu,
     },
 
     UNLIKELY_ROLES: [
@@ -2689,7 +2689,7 @@ if (window.__WEB_FETCHER_HELPER_INITIALIZED__) {
 
         // If selector is specified, only get content from the matching element
         if (request.selector) {
-          const element = document.querySelector(request.selector);
+          const element = deepQuerySelector(request.selector);
           if (element) {
             rawHtml = element.outerHTML;
           } else {
@@ -2720,7 +2720,7 @@ if (window.__WEB_FETCHER_HELPER_INITIALIZED__) {
       try {
         // If selector is specified, only get content from the matching element
         if (request.selector) {
-          const element = document.querySelector(request.selector);
+          const element = deepQuerySelector(request.selector);
           if (element) {
             // Directly get the text content of the element
             const textContent = element.innerText;
@@ -2756,6 +2756,15 @@ if (window.__WEB_FETCHER_HELPER_INITIALIZED__) {
           let fullContent = bodyText;
           if (iframeContent && iframeContent.trim().length > config.minTextLength) {
             fullContent += '\n\n--- Embedded Content ---\n\n' + iframeContent;
+          }
+
+          // Append OPEN shadow-root content: body.innerText does NOT include it,
+          // so a dialog rendered inside a shadow root (LinkedIn's composer under
+          // #interop-outlet) is otherwise invisible to the agent — it reads an
+          // unchanged feed, concludes its click did nothing, and loops.
+          const shadowContent = extractShadowContent();
+          if (shadowContent) {
+            fullContent += '\n\n' + shadowContent;
           }
 
           // Best-effort Readability extraction for real article pages. Never let
@@ -2857,6 +2866,73 @@ if (window.__WEB_FETCHER_HELPER_INITIALIZED__) {
    * Extract content from iframes
    * @returns {string} - Combined iframe content
    */
+  // CSS lookup across OPEN shadow roots (same traversal as the click/fill/upload
+  // helpers) — a recorded selector must resolve no matter which root hosts it.
+  function deepQuerySelector(selector, root, depth) {
+    root = root || document;
+    depth = depth || 0;
+    if (depth > 10) return null;
+    try {
+      const hit = root.querySelector(selector);
+      if (hit) return hit;
+    } catch (e) {
+      return null;
+    }
+    let all = [];
+    try {
+      all = root.querySelectorAll('*');
+    } catch (e) {
+      return null;
+    }
+    for (let i = 0; i < all.length; i++) {
+      if (all[i].shadowRoot) {
+        const found = deepQuerySelector(selector, all[i].shadowRoot, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  // Visible text inside OPEN shadow roots, labeled per host, capped. Nested
+  // roots are walked because an element's innerText never includes its own
+  // shadow content.
+  function extractShadowContent() {
+    const parts = [];
+    let budget = 20000;
+    function walk(root, depth) {
+      if (depth > 10 || budget <= 0) return;
+      let all = [];
+      try {
+        all = root.querySelectorAll('*');
+      } catch (e) {
+        return;
+      }
+      for (let i = 0; i < all.length; i++) {
+        const sr = all[i].shadowRoot;
+        if (!sr) continue;
+        let text = '';
+        try {
+          const kids = sr.children || [];
+          for (let k = 0; k < kids.length; k++) text += (kids[k].innerText || '') + '\n';
+        } catch (e) {
+          /* keep going */
+        }
+        text = cleanContent(text || '');
+        if (text && text.length > 40) {
+          const host = all[i];
+          const label = host.tagName.toLowerCase() + (host.id ? '#' + host.id : '');
+          const chunk = text.slice(0, budget);
+          budget -= chunk.length;
+          parts.push('--- shadow: ' + label + ' ---\n' + chunk);
+        }
+        walk(sr, depth + 1);
+        if (budget <= 0) break;
+      }
+    }
+    walk(document, 0);
+    return parts.join('\n\n');
+  }
+
   function extractIframeContent() {
     let allIframeText = '';
     const iframes = document.querySelectorAll('iframe');

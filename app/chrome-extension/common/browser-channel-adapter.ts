@@ -10,11 +10,22 @@
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 import type { ToolResult } from './tool-handler';
 
-export type BrowserAction = 'navigate' | 'read' | 'click' | 'fill' | 'screenshot' | 'scroll';
+export type BrowserAction =
+  | 'navigate'
+  | 'read'
+  | 'click'
+  | 'fill'
+  | 'screenshot'
+  | 'scroll'
+  | 'upload';
 
 export interface CommandEnvelope {
   command_id: string;
   correlation_id: string;
+  // Lane = one concurrent agent task on the server (runId / conversation /
+  // agent). Each lane pins its OWN tab so several agents can work at once.
+  // Absent/null ⇒ the 'default' lane = the legacy single channel tab.
+  lane_id?: string | null;
   action: BrowserAction;
   args: Record<string, any>;
 }
@@ -22,6 +33,7 @@ export interface CommandEnvelope {
 export interface ResultEnvelope {
   command_id: string;
   correlation_id: string;
+  lane_id?: string | null;
   status: 'success' | 'failed';
   message: string;
   data: Record<string, any>;
@@ -29,7 +41,7 @@ export interface ResultEnvelope {
 }
 
 // ACTION → { internal tool name, arg transform }. This is the ONLY place the
-// platform's bounded-five vocabulary meets the fork's internal tool names.
+// platform's bounded-seven vocabulary meets the fork's internal tool names.
 const ACTION_MAP: Record<
   BrowserAction,
   { tool: string; buildArgs: (a: Record<string, any>) => Record<string, any> }
@@ -57,6 +69,9 @@ const ACTION_MAP: Record<
       storeBase64: true,
       fullPage: false,
       selector: a.selector || undefined,
+      // Capture via CDP on the (possibly background) channel tab — never needs to
+      // bring the tab to the foreground.
+      background: true,
     }),
   },
   scroll: {
@@ -67,18 +82,34 @@ const ACTION_MAP: Record<
       amount: a.amount,
     }),
   },
+  upload: {
+    tool: TOOL_NAMES.BROWSER.FILE_UPLOAD, // chrome_upload_file
+    // Bytes arrive base64 IN the command (server-resolved) — the extension
+    // never fetches storage URLs (they may point at an internal endpoint).
+    buildArgs: (a) => ({
+      selector: a.selector,
+      base64Data: a.base64,
+      fileName: a.file_name || undefined,
+      mimeType: a.mime_type || undefined,
+    }),
+  },
 };
 
 export function isSupportedAction(action: string): action is BrowserAction {
   return Object.prototype.hasOwnProperty.call(ACTION_MAP, action);
 }
 
-export function resolveToolCall(
-  action: BrowserAction,
-  args: Record<string, any>,
-): { name: string; args: Record<string, any> } {
-  const m = ACTION_MAP[action];
-  return { name: m.tool, args: m.buildArgs(args || {}) };
+export function resolveToolCall(command: CommandEnvelope): {
+  name: string;
+  args: Record<string, any>;
+} {
+  const m = ACTION_MAP[command.action];
+  // laneId is injected AFTER buildArgs so the per-action transforms stay
+  // lane-agnostic; every tool resolves its target tab from this lane.
+  return {
+    name: m.tool,
+    args: { ...m.buildArgs(command.args || {}), laneId: command.lane_id || 'default' },
+  };
 }
 
 // Pull the first text content item's string out of a ToolResult.
@@ -97,7 +128,11 @@ export function toResultEnvelope(
   command: CommandEnvelope,
   result: ToolResult,
 ): ResultEnvelope {
-  const base = { command_id: command.command_id, correlation_id: command.correlation_id };
+  const base = {
+    command_id: command.command_id,
+    correlation_id: command.correlation_id,
+    lane_id: command.lane_id || null,
+  };
   const text = firstText(result);
 
   if (result && result.isError) {
@@ -159,6 +194,7 @@ export function failureEnvelope(
   return {
     command_id: command.command_id,
     correlation_id: command.correlation_id,
+    lane_id: command.lane_id || null,
     status: 'failed',
     message,
     data: {},

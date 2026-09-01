@@ -670,19 +670,12 @@ function buildAgentPrompt(payload: WebEditorApplyPayload): string {
 }
 
 async function ensureContextMenu(): Promise<void> {
+  // Context menu entry intentionally removed for the dedicated Kareenos build.
+  // Clean up any stale menu left over from previous installs.
   try {
-    if (!(chrome as any).contextMenus?.create) return;
-    try {
-      await chrome.contextMenus.remove(CONTEXT_MENU_ID);
-    } catch {}
-    await chrome.contextMenus.create({
-      id: CONTEXT_MENU_ID,
-      title: '切换网页编辑模式',
-      contexts: ['all'],
-    });
-  } catch (error) {
-    console.warn('[WebEditor] Failed to ensure context menu:', error);
-  }
+    if (!(chrome as any).contextMenus?.remove) return;
+    await chrome.contextMenus.remove(CONTEXT_MENU_ID);
+  } catch {}
 }
 
 /**
@@ -1499,7 +1492,7 @@ export function initWebEditorListeners(): void {
             return sendResponse({
               success: false,
               error:
-                'No Agent project selected. Open Side Panel → 智能助手 and select/create a project first.',
+                'No Agent project selected. Open Side Panel → Assistant and select/create a project first.',
             });
           }
 

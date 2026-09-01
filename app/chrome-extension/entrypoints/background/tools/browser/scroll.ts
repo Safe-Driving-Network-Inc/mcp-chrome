@@ -13,6 +13,7 @@ interface ScrollToolParams {
   amount?: number; // pixels for up/down; default ~85% of the container's viewport
   tabId?: number;
   windowId?: number;
+  laneId?: string; // which lane's tab to scroll
 }
 
 class ScrollTool extends BaseBrowserToolExecutor {

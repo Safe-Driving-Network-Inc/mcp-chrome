@@ -1,5 +1,10 @@
 import { createErrorResponse, ToolResult } from '@/common/tool-handler';
-import { BaseBrowserToolExecutor } from '../base-browser';
+import {
+  BaseBrowserToolExecutor,
+  BRING_WINDOW_TO_FRONT,
+  ACTIVATE_CHANNEL_TAB,
+  DEFAULT_LANE,
+} from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 
 // Default window dimensions
@@ -15,6 +20,7 @@ interface NavigateToolParams {
   tabId?: number;
   windowId?: number;
   background?: boolean; // when true, do not activate tab or focus window
+  laneId?: string; // which lane's tab this navigation drives/creates
 }
 
 /**
@@ -42,6 +48,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
       background,
       windowId,
     } = args;
+    const laneId = args.laneId || DEFAULT_LANE;
 
     console.log(
       `Attempting to ${refresh ? 'refresh current tab' : `open URL: ${url}`} with options:`,
@@ -132,34 +139,41 @@ class NavigateTool extends BaseBrowserToolExecutor {
         };
       }
 
-      // Attended browser channel: by default the agent drives EXACTLY ONE tab
-      // (the channel tab). Navigation happens IN PLACE on that tab — we do not
-      // open a new tab per URL (the old per-path matching spawned a tab on every
-      // hop and let read/click drift to a different tab). A new tab/window is
-      // created only on explicit opt-in (newWindow / width / height) or when no
-      // channel tab exists yet.
+      // Attended browser channel: each LANE drives EXACTLY ONE tab. Navigation
+      // happens IN PLACE on that lane's tab — we do not open a new tab per URL
+      // (the old per-path matching spawned a tab on every hop and let read/click
+      // drift to a different tab). A new tab/window is created only on explicit
+      // opt-in (newWindow / width / height) or when the lane has no tab yet —
+      // which is how each concurrent agent task gets its own dedicated tab.
       const openInNewWindow = newWindow || typeof width === 'number' || typeof height === 'number';
 
       if (!openInNewWindow) {
-        // Resolve the channel tab (explicit tabId → pinned → active) and steer it.
-        let channelTab: chrome.tabs.Tab | null = null;
-        try {
-          channelTab = await this.resolveTargetTab({ tabId, windowId });
-        } catch {
-          channelTab = null;
+        // Steer ONLY an explicit tab or the lane's already-pinned tab. Do NOT
+        // adopt the user's currently-active tab here — navigating it in place
+        // would hijack whatever the user is looking at (e.g. the agent-runner
+        // tab itself, or ANOTHER lane's tab). When the lane has no tab yet,
+        // fall through to OPEN A NEW dedicated tab below.
+        let channelTab: chrome.tabs.Tab | null = await this.tryGetTab(tabId);
+        if (!channelTab) {
+          const pinnedId = await this.getChannelTabId(laneId);
+          if (pinnedId != null) channelTab = await this.tryGetTab(pinnedId);
         }
 
         if (channelTab && typeof channelTab.id === 'number') {
           await chrome.tabs.update(channelTab.id, {
             url,
-            active: background === true ? false : true,
+            active: ACTIVATE_CHANNEL_TAB && background !== true,
           });
-          if (background !== true && typeof channelTab.windowId === 'number') {
+          if (
+            background !== true &&
+            BRING_WINDOW_TO_FRONT &&
+            typeof channelTab.windowId === 'number'
+          ) {
             await chrome.windows.update(channelTab.windowId, { focused: true });
           }
           // Wait for the page to settle so a following read/click sees the new page.
           await this.waitForTabLoad(channelTab.id);
-          await this.setChannelTab(channelTab.id);
+          await this.setChannelTab(channelTab.id, laneId);
 
           const updatedTab = await chrome.tabs.get(channelTab.id);
           await this.triggerAutoCapture(updatedTab.id!, updatedTab.url);
@@ -191,7 +205,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
           url: url,
           width: typeof width === 'number' ? width : DEFAULT_WINDOW_WIDTH,
           height: typeof height === 'number' ? height : DEFAULT_WINDOW_HEIGHT,
-          focused: background === true ? false : true,
+          focused: background !== true && BRING_WINDOW_TO_FRONT,
         });
 
         if (newWindow && newWindow.id !== undefined) {
@@ -200,8 +214,8 @@ class NavigateTool extends BaseBrowserToolExecutor {
           // Trigger auto-capture if the new window has a tab
           const firstTab = newWindow.tabs?.[0];
           if (firstTab?.id) {
-            // Adopt the new window's tab as the channel tab subsequent tools drive.
-            await this.setChannelTab(firstTab.id);
+            // Adopt the new window's tab as this lane's tab subsequent tools drive.
+            await this.setChannelTab(firstTab.id, laneId);
             await this.waitForTabLoad(firstTab.id);
             await this.triggerAutoCapture(firstTab.id, firstTab.url);
           }
@@ -243,9 +257,9 @@ class NavigateTool extends BaseBrowserToolExecutor {
           const newTab = await chrome.tabs.create({
             url: url,
             windowId: targetWindow.id,
-            active: background === true ? false : true,
+            active: ACTIVATE_CHANNEL_TAB && background !== true,
           });
-          if (background !== true) {
+          if (background !== true && BRING_WINDOW_TO_FRONT) {
             await chrome.windows.update(targetWindow.id, { focused: true });
           }
 
@@ -253,9 +267,9 @@ class NavigateTool extends BaseBrowserToolExecutor {
             `URL opened in new Tab ID: ${newTab.id} in existing Window ID: ${targetWindow.id}`,
           );
 
-          // This newly created tab becomes the single channel tab the agent drives.
+          // This newly created tab becomes the lane's single tab the agent drives.
           if (newTab.id) {
-            await this.setChannelTab(newTab.id);
+            await this.setChannelTab(newTab.id, laneId);
             await this.waitForTabLoad(newTab.id);
             await this.triggerAutoCapture(newTab.id, newTab.url);
           }
@@ -284,7 +298,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
             url: url,
             width: DEFAULT_WINDOW_WIDTH,
             height: DEFAULT_WINDOW_HEIGHT,
-            focused: true,
+            focused: BRING_WINDOW_TO_FRONT,
           });
 
           if (fallbackWindow && fallbackWindow.id !== undefined) {
@@ -293,7 +307,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
             // Trigger auto-capture if fallback window has a tab
             const firstTab = fallbackWindow.tabs?.[0];
             if (firstTab?.id) {
-              await this.setChannelTab(firstTab.id);
+              await this.setChannelTab(firstTab.id, laneId);
               await this.waitForTabLoad(firstTab.id);
               await this.triggerAutoCapture(firstTab.id, firstTab.url);
             }

@@ -1,6 +1,6 @@
 <template>
   <div class="flex items-center gap-2">
-    <!-- 螺旋动画图标（仅 running/starting 状态显示，且未被父组件隐藏时） -->
+    <!-- Spiral loading icon (shown only in running/starting state, unless hidden by parent) -->
     <svg
       v-if="isRunning && !hideIcon"
       class="loading-scribble w-4 h-4 flex-shrink-0"
@@ -15,7 +15,7 @@
       />
     </svg>
 
-    <!-- shimmer 文案（running 状态）或普通文案 -->
+    <!-- Shimmer text (running state) or plain text -->
     <span
       class="text-xs italic"
       :class="{ 'text-shimmer': isRunning }"
@@ -37,24 +37,24 @@ const props = defineProps<{
   hideIcon?: boolean;
 }>();
 
-// 是否处于运行状态
+// Whether the step is in a running state
 const isRunning = computed(
   () => props.item.status === 'running' || props.item.status === 'starting',
 );
 
-// 随机文案（仅 running 状态使用）
+// Random text (used only in the running state)
 const randomText = ref(getRandomLoadingText());
 
-// 定时更新文案的 timeout ID
+// Timeout ID for periodically updating the text
 let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
-// 记录上一次的运行状态，用于判断状态变化
+// Track the previous running state to detect state changes
 let wasRunning = false;
 
-// 启动定时器
+// Start the timer
 function startInterval(): void {
   if (timeoutId) return;
-  // 5-8 秒随机间隔更新文案
+  // Update text at a random 5-8 second interval
   const scheduleNext = () => {
     timeoutId = setTimeout(
       () => {
@@ -67,7 +67,7 @@ function startInterval(): void {
   scheduleNext();
 }
 
-// 停止定时器
+// Stop the timer
 function stopInterval(): void {
   if (timeoutId) {
     clearTimeout(timeoutId);
@@ -75,9 +75,9 @@ function stopInterval(): void {
   }
 }
 
-// 监听运行状态变化 - 只在状态真正变化时才处理
+// Watch running-state changes - only act when the state actually changes
 watch(isRunning, (running) => {
-  // 只在从非运行变为运行时，才重新生成文案并启动定时器
+  // Only regenerate text and start the timer when going from not-running to running
   if (running && !wasRunning) {
     randomText.value = getRandomLoadingText();
     startInterval();
@@ -87,7 +87,7 @@ watch(isRunning, (running) => {
   wasRunning = running;
 });
 
-// 初始化
+// Initialize
 onMounted(() => {
   wasRunning = isRunning.value;
   if (isRunning.value) {
@@ -99,7 +99,7 @@ onUnmounted(() => {
   stopInterval();
 });
 
-// 非运行状态的默认文案
+// Default text for non-running states
 const defaultText = computed(() => {
   switch (props.item.status) {
     case 'completed':
@@ -113,7 +113,7 @@ const defaultText = computed(() => {
   }
 });
 
-// 最终显示的文案
+// Final text to display
 const displayText = computed(() => {
   if (isRunning.value) {
     return randomText.value;

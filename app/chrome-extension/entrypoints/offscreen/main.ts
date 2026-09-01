@@ -8,7 +8,7 @@ import {
 import { handleGifMessage } from './gif-encoder';
 import { initKeepalive } from './rr-keepalive';
 
-// 初始化 RR V3 Keepalive
+// Initialize RR V3 Keepalive
 initKeepalive();
 
 // Global semantic similarity engine instance
@@ -287,11 +287,11 @@ async function clearVectorIndexedDB(): Promise<void> {
           };
           deleteRequest.onerror = () => {
             console.warn(`Offscreen: Failed to delete database: ${dbName}`, deleteRequest.error);
-            resolve(); // 不阻塞其他数据库的清理
+            resolve(); // do not block cleanup of the other databases
           };
           deleteRequest.onblocked = () => {
             console.warn(`Offscreen: Database deletion blocked: ${dbName}`);
-            resolve(); // 不阻塞其他数据库的清理
+            resolve(); // do not block cleanup of the other databases
           };
         });
       } catch (error) {

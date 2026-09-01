@@ -1,6 +1,6 @@
 /**
- * @fileoverview 策略类型定义
- * @description 定义 Record-Replay V3 中使用的超时、重试、错误处理和工件策略
+ * @fileoverview Policy type definitions
+ * @description The timeout, retry, error-handling and artifact policies used across Record-Replay V3
  */
 
 import type { EdgeLabel, NodeId } from './ids';
@@ -8,38 +8,38 @@ import type { RRErrorCode } from './errors';
 import type { UnixMillis } from './json';
 
 /**
- * 超时策略
- * @description 定义操作的超时时间和作用范围
+ * Timeout policy
+ * @description The timeout duration and the scope it applies to
  */
 export interface TimeoutPolicy {
-  /** 超时时间（毫秒） */
+  /** Timeout duration (ms) */
   ms: UnixMillis;
-  /** 超时范围：attempt=每次尝试, node=整个节点执行 */
+  /** Timeout scope: attempt = per attempt, node = the whole node execution */
   scope?: 'attempt' | 'node';
 }
 
 /**
- * 重试策略
- * @description 定义失败后的重试行为
+ * Retry policy
+ * @description Retry behaviour after a failure
  */
 export interface RetryPolicy {
-  /** 最大重试次数 */
+  /** Maximum retry count */
   retries: number;
-  /** 重试间隔（毫秒） */
+  /** Retry interval (ms) */
   intervalMs: UnixMillis;
-  /** 退避策略：none=固定间隔, exp=指数退避, linear=线性增长 */
+  /** Backoff strategy: none = fixed interval, exp = exponential backoff, linear = linear growth */
   backoff?: 'none' | 'exp' | 'linear';
-  /** 最大重试间隔（毫秒） */
+  /** Maximum retry interval (ms) */
   maxIntervalMs?: UnixMillis;
-  /** 抖动策略：none=无抖动, full=完全随机 */
+  /** Jitter strategy: none = no jitter, full = fully random */
   jitter?: 'none' | 'full';
-  /** 仅在这些错误码时重试 */
+  /** Retry only on these error codes */
   retryOn?: ReadonlyArray<RRErrorCode>;
 }
 
 /**
- * 错误处理策略
- * @description 定义节点执行失败后的处理方式
+ * Error-handling policy
+ * @description What to do after a node fails
  */
 export type OnErrorPolicy =
   | { kind: 'stop' }
@@ -51,51 +51,51 @@ export type OnErrorPolicy =
   | { kind: 'retry'; override?: Partial<RetryPolicy> };
 
 /**
- * 工件策略
- * @description 定义截图和日志收集的行为
+ * Artifact policy
+ * @description How screenshots and logs are collected
  */
 export interface ArtifactPolicy {
-  /** 截图策略：never=从不, onFailure=失败时, always=总是 */
+  /** Screenshot policy: never, onFailure, always */
   screenshot?: 'never' | 'onFailure' | 'always';
-  /** 截图保存路径模板 */
+  /** Path template for saved screenshots */
   saveScreenshotAs?: string;
-  /** 是否包含控制台日志 */
+  /** Whether to include console logs */
   includeConsole?: boolean;
-  /** 是否包含网络请求 */
+  /** Whether to include network requests */
   includeNetwork?: boolean;
 }
 
 /**
- * 节点级策略
- * @description 单个节点的执行策略配置
+ * Node-level policy
+ * @description Execution policy config for a single node
  */
 export interface NodePolicy {
-  /** 超时策略 */
+  /** Timeout policy */
   timeout?: TimeoutPolicy;
-  /** 重试策略 */
+  /** Retry policy */
   retry?: RetryPolicy;
-  /** 错误处理策略 */
+  /** Error-handling policy */
   onError?: OnErrorPolicy;
-  /** 工件策略 */
+  /** Artifact policy */
   artifacts?: ArtifactPolicy;
 }
 
 /**
- * Flow 级策略
- * @description 整个 Flow 的执行策略配置
+ * Flow-level policy
+ * @description Execution policy config for the whole Flow
  */
 export interface FlowPolicy {
-  /** 默认节点策略 */
+  /** Default node policy */
   defaultNodePolicy?: NodePolicy;
-  /** 不支持节点的处理策略 */
+  /** How to handle unsupported nodes */
   unsupportedNodePolicy?: OnErrorPolicy;
-  /** Run 总超时时间（毫秒） */
+  /** Overall run timeout (ms) */
   runTimeoutMs?: UnixMillis;
 }
 
 /**
- * 合并节点策略
- * @description 将 Flow 级默认策略与节点级策略合并
+ * Merge node policies
+ * @description Merges the Flow-level defaults with the node-level policy
  */
 export function mergeNodePolicy(
   flowDefault: NodePolicy | undefined,

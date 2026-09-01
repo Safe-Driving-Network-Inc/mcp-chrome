@@ -1,6 +1,6 @@
 /**
  * @fileoverview V2 to V3 Flow Conversion Tests
- * @description 测试 V2→V3 转换逻辑，特别是 entryNodeId 计算
+ * @description Tests the V2 -> V3 conversion logic, in particular the entryNodeId computation
  */
 
 import { describe, it, expect } from 'vitest';

@@ -45,21 +45,12 @@ function extractToolError(result: any): string | undefined {
 }
 
 async function ensureContextMenu() {
+  // Context menu entry intentionally removed for the dedicated Kareenos build.
+  // Clean up any stale menu left over from previous installs.
   try {
-    // Guard: contextMenus permission may be missing
-    if (!(chrome as any).contextMenus?.create) return;
-    // Remove and re-create our single menu to avoid duplication
-    try {
-      await chrome.contextMenus.remove(CONTEXT_MENU_ID);
-    } catch {}
-    await chrome.contextMenus.create({
-      id: CONTEXT_MENU_ID,
-      title: '标注元素',
-      contexts: ['all'],
-    });
-  } catch (e) {
-    console.warn('ElementMarker: ensureContextMenu failed:', e);
-  }
+    if (!(chrome as any).contextMenus?.remove) return;
+    await chrome.contextMenus.remove(CONTEXT_MENU_ID);
+  } catch {}
 }
 
 /**

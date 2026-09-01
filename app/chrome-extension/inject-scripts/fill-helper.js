@@ -77,11 +77,32 @@ if (window.__FILL_HELPER_INITIALIZED__) {
           typeof window.__kResolveElement === 'function'
             ? window.__kResolveElement(selector)
             : (function () {
-                try {
-                  return document.querySelector(selector);
-                } catch (e) {
+                // Deep query across OPEN shadow roots — LinkedIn-class UIs render
+                // the composer inside a shadow root where document.querySelector
+                // sees nothing (upload-helper has the same traversal).
+                function deep(sel, root, depth) {
+                  if (depth > 10) return null;
+                  try {
+                    const hit = root.querySelector(sel);
+                    if (hit) return hit;
+                  } catch (e) {
+                    return null;
+                  }
+                  let all = [];
+                  try {
+                    all = root.querySelectorAll('*');
+                  } catch (e) {
+                    return null;
+                  }
+                  for (let j = 0; j < all.length; j++) {
+                    if (all[j].shadowRoot) {
+                      const found = deep(sel, all[j].shadowRoot, depth + 1);
+                      if (found) return found;
+                    }
+                  }
                   return null;
                 }
+                return deep(selector, document, 0);
               })();
       } else {
         // No selector and no ref: target the focused editable element, else the

@@ -15,6 +15,7 @@
     "dev:native": "pnpm --filter mcp-chrome-bridge dev",
     "dev:extension": "pnpm --filter chrome-mcp-server dev",
     "dev": "pnpm --filter chrome-mcp-shared build && pnpm -r --parallel dev",
+    "release:extension": "bash scripts/build-extension-release.sh",
     "lint": "pnpm -r lint",
     "lint:fix": "pnpm -r lint:fix",
     "format": "pnpm -r format",

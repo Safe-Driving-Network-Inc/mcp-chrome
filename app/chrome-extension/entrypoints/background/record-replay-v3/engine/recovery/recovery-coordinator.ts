@@ -1,17 +1,17 @@
 /**
- * @fileoverview 崩溃恢复协调器 (P3-06)
+ * @fileoverview Crash recovery coordinator (P3-06)
  * @description
- * MV3 Service Worker 可能随时被终止。此协调器在 SW 启动时协调队列状态和 Run 记录，
- * 使中断的 Run 能够被恢复执行。
+ * An MV3 service worker can be terminated at any moment. On startup this coordinator reconciles
+ * the queue state against the run records so interrupted runs can resume.
  *
- * 恢复策略：
- * - 孤儿 running 项：回收为 queued，等待重新调度（从头重跑）
- * - 孤儿 paused 项：接管 lease，保持 paused 状态
- * - 已终态 Run 的队列残留：清理
+ * Recovery strategy:
+ * - Orphaned running items: returned to queued, awaiting rescheduling (rerun from the start)
+ * - Orphaned paused items: the lease is adopted, the paused status is kept
+ * - Queue leftovers for already-terminal runs: cleaned up
  *
- * 调用时机：
- * - 必须在 scheduler.start() 之前调用
- * - 通常在 SW 启动时调用一次
+ * When to call it:
+ * - Must be called before scheduler.start()
+ * - Normally called once at service worker startup
  */
 
 import type { UnixMillis } from '../../domain/json';
@@ -23,45 +23,45 @@ import type { EventsBus } from '../transport/events-bus';
 // ==================== Types ====================
 
 /**
- * 恢复结果
+ * Recovery result
  */
 export interface RecoveryResult {
-  /** 被回收为 queued 的 running Run ID */
+  /** Running run IDs that were returned to queued */
   requeuedRunning: RunId[];
-  /** 被接管的 paused Run ID */
+  /** Paused run IDs that were adopted */
   adoptedPaused: RunId[];
-  /** 被清理的已终态 Run ID */
+  /** Terminal run IDs that were cleaned up */
   cleanedTerminal: RunId[];
 }
 
 /**
- * 恢复协调器依赖
+ * Recovery coordinator dependencies
  */
 export interface RecoveryCoordinatorDeps {
-  /** 存储层 */
+  /** Storage layer */
   storage: StoragePort;
-  /** 事件总线 */
+  /** Event bus */
   events: EventsBus;
-  /** 当前 Service Worker 的 ownerId */
+  /** The current service worker's ownerId */
   ownerId: string;
-  /** 时间源 */
+  /** Time source */
   now: () => UnixMillis;
-  /** 日志器 */
+  /** Logger */
   logger?: Pick<Console, 'debug' | 'info' | 'warn' | 'error'>;
 }
 
 // ==================== Main Function ====================
 
 /**
- * 执行崩溃恢复
+ * Run crash recovery
  * @description
- * 在 SW 启动时调用，协调队列状态和 Run 记录。
+ * Called at service worker startup to reconcile the queue state against the run records.
  *
- * 执行顺序：
- * 1. 预清理：检查队列中的所有项，清理已终态或无对应 RunRecord 的残留
- * 2. 恢复孤儿租约：回收 running，接管 paused
- * 3. 同步 RunRecord 状态：确保 RunRecord 与队列状态一致
- * 4. 发送恢复事件：为 requeued running 项发送 run.recovered 事件
+ * Order of operations:
+ * 1. Pre-clean: walk every queue item and drop leftovers that are terminal or have no RunRecord
+ * 2. Recover orphaned leases: requeue running, adopt paused
+ * 3. Sync RunRecord state: make each RunRecord agree with the queue state
+ * 4. Emit recovery events: emit run.recovered for the requeued running items
  */
 export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<RecoveryResult> {
   const logger = deps.logger ?? console;
@@ -72,18 +72,18 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
 
   const now = deps.now();
 
-  // 设计理由：恢复过程必须"先清理后接管/回收"，否则可能把已经终态的 Run 重新排队执行
+  // Rationale: recovery must clean up *before* adopting or requeuing, otherwise an already-terminal run could be re-queued and run again
   const cleanedTerminalSet = new Set<RunId>();
 
-  // ==================== Step 1: 预清理 ====================
-  // 检查队列中的所有项，清理已终态或无对应 RunRecord 的残留
+  // ==================== Step 1: pre-clean ====================
+  // Walk every queue item and drop leftovers that are terminal or have no RunRecord
   try {
     const items = await deps.storage.queue.list();
     for (const item of items) {
       const runId = item.id;
       const run = await deps.storage.runs.get(runId);
 
-      // 防御性清理：无 RunRecord 的队列项无法执行
+      // Defensive cleanup: a queue item without a RunRecord cannot be executed
       if (!run) {
         try {
           await deps.storage.queue.markDone(runId, now);
@@ -95,7 +95,7 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
         continue;
       }
 
-      // 清理已终态的 Run（SW 可能在 runner 完成后、scheduler markDone 前崩溃）
+      // Clean up terminal runs (the SW can crash after the runner finishes but before the scheduler marks it done)
       if (isTerminalStatus(run.status)) {
         try {
           await deps.storage.queue.markDone(runId, now);
@@ -110,8 +110,8 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
     logger.warn('[Recovery] Pre-clean failed:', e);
   }
 
-  // ==================== Step 2: 恢复孤儿租约 ====================
-  // Best-effort：即使失败也不应该阻止启动
+  // ==================== Step 2: recover orphaned leases ====================
+  // Best-effort: a failure here must not block startup
   let requeuedRunning: Array<{ runId: RunId; prevOwnerId?: string }> = [];
   let adoptedPaused: Array<{ runId: RunId; prevOwnerId?: string }> = [];
   try {
@@ -120,16 +120,16 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
     adoptedPaused = result.adoptedPaused;
   } catch (e) {
     logger.error('[Recovery] recoverOrphanLeases failed:', e);
-    // 继续执行，不阻止启动
+    // Carry on; do not block startup
   }
 
-  // ==================== Step 3: 同步 RunRecord 状态 ====================
+  // ==================== Step 3: sync RunRecord state ====================
   const requeuedRunningIds: RunId[] = [];
   for (const entry of requeuedRunning) {
     const runId = entry.runId;
     requeuedRunningIds.push(runId);
 
-    // 跳过在 Step 1 中已清理的项
+    // Skip items already cleaned up in step 1
     if (cleanedTerminalSet.has(runId)) {
       continue;
     }
@@ -137,7 +137,7 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
     try {
       const run = await deps.storage.runs.get(runId);
       if (!run) {
-        // RunRecord 不存在，清理队列项（防御性）
+        // The RunRecord is gone, drop the queue item (defensive)
         try {
           await deps.storage.queue.markDone(runId, now);
           cleanedTerminalSet.add(runId);
@@ -151,8 +151,8 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
         continue;
       }
 
-      // 跳过已终态的 Run（可能在恢复过程中被其他逻辑更新）
-      // 同时清理队列项，防止残留
+      // Skip terminal runs (something else may have updated them during recovery)
+      // and drop the queue item so nothing is left behind
       if (isTerminalStatus(run.status)) {
         try {
           await deps.storage.queue.markDone(runId, now);
@@ -166,10 +166,10 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
         continue;
       }
 
-      // 更新 RunRecord 状态为 queued
+      // Set the RunRecord state to queued
       await deps.storage.runs.patch(runId, { status: 'queued', updatedAt: now });
 
-      // 发送恢复事件（best-effort，失败不影响恢复流程）
+      // Emit the recovery event (best-effort; a failure must not derail recovery)
       try {
         const fromStatus: 'running' | 'paused' = run.status === 'paused' ? 'paused' : 'running';
         await deps.events.append({
@@ -184,20 +184,20 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
         logger.info(`[Recovery] Requeued orphan running run: ${runId} (from=${fromStatus})`);
       } catch (eventErr) {
         logger.warn('[Recovery] Failed to emit run.recovered event:', runId, eventErr);
-        // 继续执行，不影响恢复流程
+        // Carry on; this must not derail recovery
       }
     } catch (e) {
       logger.warn('[Recovery] Reconcile requeued running failed:', runId, e);
     }
   }
 
-  // ==================== Step 4: 同步 adopted paused 的 RunRecord ====================
+  // ==================== Step 4: sync the RunRecords of adopted paused items ====================
   const adoptedPausedIds: RunId[] = [];
   for (const entry of adoptedPaused) {
     const runId = entry.runId;
     adoptedPausedIds.push(runId);
 
-    // 跳过在 Step 1 中已清理的项
+    // Skip items already cleaned up in step 1
     if (cleanedTerminalSet.has(runId)) {
       continue;
     }
@@ -205,7 +205,7 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
     try {
       const run = await deps.storage.runs.get(runId);
       if (!run) {
-        // RunRecord 不存在，清理队列项（防御性）
+        // The RunRecord is gone, drop the queue item (defensive)
         try {
           await deps.storage.queue.markDone(runId, now);
           cleanedTerminalSet.add(runId);
@@ -219,7 +219,7 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
         continue;
       }
 
-      // 跳过已终态的 Run，同时清理队列项
+      // Skip terminal runs and drop the queue item
       if (isTerminalStatus(run.status)) {
         try {
           await deps.storage.queue.markDone(runId, now);
@@ -233,7 +233,7 @@ export async function recoverFromCrash(deps: RecoveryCoordinatorDeps): Promise<R
         continue;
       }
 
-      // 如果 RunRecord 状态不是 paused，同步更新
+      // If the RunRecord state is not paused, sync it
       if (run.status !== 'paused') {
         await deps.storage.runs.patch(runId, { status: 'paused' as RunStatus, updatedAt: now });
       }

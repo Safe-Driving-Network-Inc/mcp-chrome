@@ -1,5 +1,9 @@
 import { createErrorResponse, ToolResult } from '@/common/tool-handler';
-import { BaseBrowserToolExecutor } from '../base-browser';
+import {
+  BaseBrowserToolExecutor,
+  BRING_WINDOW_TO_FRONT,
+  ACTIVATE_CHANNEL_TAB,
+} from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 import { TOOL_MESSAGE_TYPES } from '@/common/message-types';
 
@@ -11,6 +15,8 @@ interface WebFetcherToolParams {
   tabId?: number; // target existing tab id
   background?: boolean; // do not activate/focus
   windowId?: number; // target window id to pick active tab or create tab
+  laneId?: string; // which lane's tab to read
+  frameId?: number; // read only this frame (default: top frame + meaningful child frames)
 }
 
 class WebFetcherTool extends BaseBrowserToolExecutor {
@@ -69,9 +75,9 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
           await new Promise((resolve) => setTimeout(resolve, 3000));
         }
       } else {
-        // Target the single channel tab the agent drives (same tab navigate steers),
+        // Target the lane's single tab (same tab this lane's navigate steers),
         // so a read always reflects the page the agent just navigated to.
-        tab = await this.resolveTargetTab({ windowId });
+        tab = await this.resolveTargetTab({ windowId, laneId: args.laneId });
       }
 
       if (!tab.id) {
@@ -80,8 +86,15 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
 
       // Optionally bring tab/window to foreground
       if (!background) {
-        await chrome.tabs.update(tab.id, { active: true });
-        await chrome.windows.update(tab.windowId, { focused: true });
+        // Fully background by default: don't switch the user's active tab and
+        // never raise Chrome to the OS foreground. (read works on a background
+        // tab via the injected content script.)
+        if (ACTIVATE_CHANNEL_TAB) {
+          await chrome.tabs.update(tab.id, { active: true });
+        }
+        if (BRING_WINDOW_TO_FRONT) {
+          await chrome.windows.update(tab.windowId, { focused: true });
+        }
       }
 
       // Prepare result object
@@ -91,51 +104,110 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
         title: tab.title,
       };
 
-      await this.injectContentScript(tab.id, ['inject-scripts/web-fetcher-helper.js']);
+      // READ EVERY FRAME. Real apps render dialogs/composers inside a same-origin
+      // CHILD frame (LinkedIn's post box is one) — a top-frame-only read then
+      // returns the page behind the dialog, so the agent concludes its click did
+      // nothing and starts over. Frames are read in order (top first) and joined.
+      const frameIds = await this.listFrameIds(tab.id, args.frameId);
+      const MIN_FRAME_CHARS = 80; // below this a frame is an ad/tracker/blank shim
+      const MAX_EXTRA_FRAME_CHARS = 20000; // don't let odd pages blow up context
 
-      // Get HTML content if requested
-      if (htmlContent) {
-        const htmlResponse = await this.sendMessageToTab(tab.id, {
-          action: TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_HTML_CONTENT,
-          selector: selector,
-        });
-
-        if (htmlResponse.success) {
-          result.htmlContent = htmlResponse.htmlContent;
-        } else {
-          console.error('Failed to get HTML content:', htmlResponse.error);
-          result.htmlContentError = htmlResponse.error;
+      // frameId -> url, purely to label each block in the joined text.
+      const frameUrls: Record<number, string> = {};
+      if (frameIds.length > 1) {
+        try {
+          const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+          (frames || []).forEach((f) => {
+            frameUrls[f.frameId] = f.url || '';
+          });
+        } catch (e) {
+          /* labels are cosmetic */
         }
+      }
+
+      const readFrame = async (fid: number | undefined, action: string) => {
+        await this.injectContentScript(
+          tab.id!,
+          ['inject-scripts/web-fetcher-helper.js'],
+          false,
+          'ISOLATED',
+          false,
+          fid === undefined ? undefined : [fid],
+        );
+        return this.sendMessageToTab(tab.id!, { action, selector: selector }, fid);
+      };
+
+      // Get HTML content if requested — first frame that answers wins.
+      if (htmlContent) {
+        let lastError = '';
+        for (const fid of frameIds) {
+          try {
+            const r = await readFrame(fid, TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_HTML_CONTENT);
+            if (r && r.success && r.htmlContent) {
+              result.htmlContent = r.htmlContent;
+              break;
+            }
+            lastError = (r && r.error) || lastError;
+          } catch (e) {
+            lastError = e instanceof Error ? e.message : String(e);
+          }
+        }
+        if (result.htmlContent === undefined) result.htmlContentError = lastError || 'not found';
       }
 
       // Get text content if requested (and htmlContent is not true)
       if (textContent) {
-        const textResponse = await this.sendMessageToTab(tab.id, {
-          action: TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_TEXT_CONTENT,
-          selector: selector,
-        });
+        let lastError = '';
+        let primary: any = null;
+        const extras: string[] = [];
+        let extraChars = 0;
 
-        if (textResponse.success) {
-          result.textContent = textResponse.textContent;
+        for (const fid of frameIds) {
+          let r: any = null;
+          try {
+            r = await readFrame(fid, TOOL_MESSAGE_TYPES.WEB_FETCHER_GET_TEXT_CONTENT);
+          } catch (e) {
+            lastError = e instanceof Error ? e.message : String(e);
+            continue;
+          }
+          if (!r || !r.success) {
+            lastError = (r && r.error) || lastError;
+            continue;
+          }
+          // With a selector, the first frame that matches is the answer.
+          if (selector) {
+            primary = r;
+            break;
+          }
+          if (!primary) {
+            primary = r; // top frame (or first readable frame) owns the metadata
+            continue;
+          }
+          const txt = String(r.textContent || '').trim();
+          if (txt.length < MIN_FRAME_CHARS) continue; // ad/tracker/blank frame
+          if (extraChars >= MAX_EXTRA_FRAME_CHARS) continue;
+          const slice = txt.slice(0, MAX_EXTRA_FRAME_CHARS - extraChars);
+          extraChars += slice.length;
+          const label = (fid !== undefined && frameUrls[fid]) || `frame ${fid}`;
+          extras.push(`\n\n--- frame: ${label} ---\n${slice}`);
+        }
 
-          // Include article metadata if available
-          if (textResponse.article) {
+        if (primary) {
+          result.textContent = String(primary.textContent || '') + extras.join('');
+          if (extras.length) result.framesIncluded = extras.length;
+          if (primary.article) {
             result.article = {
-              title: textResponse.article.title,
-              byline: textResponse.article.byline,
-              siteName: textResponse.article.siteName,
-              excerpt: textResponse.article.excerpt,
-              lang: textResponse.article.lang,
+              title: primary.article.title,
+              byline: primary.article.byline,
+              siteName: primary.article.siteName,
+              excerpt: primary.article.excerpt,
+              lang: primary.article.lang,
             };
           }
-
-          // Include page metadata if available
-          if (textResponse.metadata) {
-            result.metadata = textResponse.metadata;
-          }
+          if (primary.metadata) result.metadata = primary.metadata;
         } else {
-          console.error('Failed to get text content:', textResponse.error);
-          result.textContentError = textResponse.error;
+          console.error('Failed to get text content:', lastError);
+          result.textContentError = lastError || 'not found';
         }
       }
 

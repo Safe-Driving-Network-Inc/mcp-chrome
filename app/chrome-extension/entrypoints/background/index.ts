@@ -2,6 +2,7 @@
 // engine are removed. The ONLY command source is the outbound wss client
 // (P1.3), wired in below. Semantic/vector search is out of scope.
 import { initBrowserChannelClient } from './browser-channel-client';
+import { initLearnMode } from './learn-mode';
 import { initStorageManagerListener } from './storage-manager';
 import { initRecordReplayListeners } from './record-replay';
 import { initElementMarkerListeners } from './element-marker';
@@ -24,15 +25,25 @@ const ENABLE_RR_V3 = true;
  * Initializes all background services and listeners
  */
 export default defineBackground(() => {
-  // No onboarding page: the upstream welcome page instructs installing the
-  // mcp-chrome-bridge + a localhost MCP server, both of which the Kareenos channel
-  // removed. The only setup is the popup → Sign in flow. (Welcome page left in the
-  // build but no longer auto-opened.)
+  // On fresh install, open the Kareenos onboarding page that guides the user
+  // through connecting the extension to the platform. Only on 'install' (not on
+  // update/reload) so we don't nag on every rebuild.
+  chrome.runtime.onInstalled.addListener((details) => {
+    if (details.reason === 'install') {
+      try {
+        chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
+      } catch (e) {
+        console.warn('[Kareenos] could not open welcome page:', e);
+      }
+    }
+  });
 
   // Initialize core services
   // The outbound wss client — the only command source — binds identity and
   // dispatches the bounded five. Replaces the removed native-messaging host.
   initBrowserChannelClient();
+  // Learn Mode: record a user demonstration → macro shipped over the channel.
+  initLearnMode();
   initStorageManagerListener();
   // Record & Replay V1/V2 listeners
   initRecordReplayListeners();

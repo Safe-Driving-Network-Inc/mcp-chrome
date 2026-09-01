@@ -1,29 +1,179 @@
-/* Kareenos Browser Channel — minimal popup styles (P1.5). */
-* { box-sizing: border-box; }
-html, body { margin: 0; }
+/* Kareenos Browser Channel — minimal popup styles (P1.5).
+ *
+ * Brand v5 (indigo/violet/cyan). The popup uses the v5 dark panel (#0B1220) —
+ * the same ground as the platform footer/panel — with solid indigo as the only
+ * accent. Tokens are mirrored here because an extension page cannot reach the
+ * platform's quasar.variables.scss / theme.scss; edit the tokens, not the rules.
+ * Source of truth: docs/brandv5/kareenos design and style v5.md
+ */
+:root {
+  --kn-indigo: #4f46e5;
+  --kn-indigo-dark: #4338ca;
+  --kn-cyan: #06b6d4;
+  --kn-panel: #0b1220;
+  --kn-panel-raised: #151d31;
+  --kn-panel-hover: #1d2740;
+  --kn-line: #232d45;
+  --kn-ink: #e8ebf3;
+  --kn-ink-soft: #99a3ba;
+  --kn-ok: #22c55e;
+  --kn-warn: #eab308;
+  --kn-err: #ef4444;
+  --kn-idle: #6b7280;
+}
+* {
+  box-sizing: border-box;
+}
+html,
 body {
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
-  background: #0b1020;
-  color: #e6e9f0;
+  margin: 0;
+}
+body {
+  font-family:
+    'Manrope',
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    Arial,
+    sans-serif;
+  background: var(--kn-panel);
+  color: var(--kn-ink);
   width: 300px;
 }
-.kc { padding: 16px 18px; }
-.kc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
-.kc-head h1 { font-size: 15px; font-weight: 600; margin: 0; }
-.kc-dot { width: 10px; height: 10px; border-radius: 50%; background: #6b7280; flex: 0 0 auto; }
-.kc-dot.kc-bound { background: #22c55e; }
-.kc-dot.kc-connecting { background: #eab308; }
-.kc-dot.kc-disconnected { background: #6b7280; }
-.kc-dot.kc-error { background: #ef4444; }
-.kc-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 13px; border-bottom: 1px solid #1c2335; }
-.kc-k { color: #9aa3b5; }
-.kc-v { color: #e6e9f0; font-weight: 500; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.kc-actions { display: flex; gap: 8px; margin-top: 16px; }
-.kc-btn {
-  flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid #2a3350;
-  background: #161c2e; color: #e6e9f0; font-size: 13px; cursor: pointer;
+.kc {
+  padding: 16px 18px;
 }
-.kc-btn:hover { background: #1c2440; }
-.kc-primary { background: #2563eb; border-color: #2563eb; }
-.kc-primary:hover { background: #1d4ed8; }
-.kc-note { color: #9aa3b5; font-size: 11px; margin: 10px 0 0; min-height: 14px; }
+.kc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.kc-head h1 {
+  font-family:
+    'Space Grotesk',
+    'Manrope',
+    system-ui,
+    -apple-system,
+    sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
+  flex: 1 1 auto;
+}
+/* The v5 gradient K. The status dot moves to the trailing edge so the mark
+   reads as the identity and the dot as state, not the other way round. */
+.kc-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  display: block;
+}
+.kc-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--kn-idle);
+  flex: 0 0 auto;
+}
+.kc-dot.kc-bound {
+  background: var(--kn-ok);
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+}
+.kc-dot.kc-connecting {
+  background: var(--kn-warn);
+}
+.kc-dot.kc-disconnected {
+  background: var(--kn-idle);
+}
+.kc-dot.kc-error {
+  background: var(--kn-err);
+}
+.kc-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--kn-line);
+}
+.kc-k {
+  color: var(--kn-ink-soft);
+}
+.kc-v {
+  color: var(--kn-ink);
+  font-weight: 500;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kc-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+.kc-btn {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--kn-line);
+  background: var(--kn-panel-raised);
+  color: var(--kn-ink);
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.kc-btn:hover {
+  background: var(--kn-panel-hover);
+}
+.kc-primary {
+  background: var(--kn-indigo);
+  border-color: var(--kn-indigo);
+}
+.kc-primary:hover {
+  background: var(--kn-indigo-dark);
+}
+.kc-note {
+  color: var(--kn-ink-soft);
+  font-size: 11px;
+  margin: 10px 0 0;
+  min-height: 14px;
+}
+/* Learn Mode block: same panel language; the recording state borrows the error
+   red for the classic "recording" affordance without adding a new token. */
+.kc-learn {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--kn-line);
+}
+.kc-learn-head {
+  color: var(--kn-ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.kc-input {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--kn-line);
+  background: var(--kn-panel-raised);
+  color: var(--kn-ink);
+  font-size: 12px;
+  font-family: inherit;
+}
+.kc-input::placeholder {
+  color: var(--kn-idle);
+}
+.kc-input:disabled {
+  opacity: 0.6;
+}
+.kc-btn.kc-recording {
+  background: var(--kn-err);
+  border-color: var(--kn-err);
+  color: #fff;
+}

@@ -77,19 +77,47 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
     });
     return vis[0];
   }
+  // Deep query across OPEN shadow roots (mirrors upload-helper's traversal).
+  // Modern obfuscated UIs (LinkedIn's #interop-outlet) render whole surfaces —
+  // the share composer included — inside a shadow root, where plain
+  // document.querySelectorAll sees NOTHING. Upload already pierced shadow DOM;
+  // click/fill were blind, so recorded [aria-label=...] selectors "didn't exist".
+  function __kDeepQueryAll(selector, root, out, depth) {
+    root = root || document;
+    out = out || [];
+    depth = depth || 0;
+    if (depth > 10 || out.length > 4000) return out;
+    let matches = [];
+    try {
+      matches = root.querySelectorAll(selector);
+    } catch (e) {
+      return out;
+    }
+    for (let i = 0; i < matches.length; i++) out.push(matches[i]);
+    let all = [];
+    try {
+      all = root.querySelectorAll('*');
+    } catch (e) {
+      return out;
+    }
+    for (let j = 0; j < all.length; j++) {
+      if (all[j].shadowRoot) __kDeepQueryAll(selector, all[j].shadowRoot, out, depth + 1);
+    }
+    return out;
+  }
   function __kFindByText(query) {
     const q = String(query).trim().toLowerCase();
     if (!q) return null;
     const interactive =
       'a,button,[role="button"],[role="link"],[role="menuitem"],[role="tab"],' +
       'input[type="submit"],input[type="button"],[onclick],[tabindex]';
-    const candidates = Array.from(document.querySelectorAll(interactive));
+    const candidates = __kDeepQueryAll(interactive);
     const exact = __kPickBest(candidates.filter((el) => __kName(el).toLowerCase() === q));
     if (exact) return exact;
     const contains = __kPickBest(candidates.filter((el) => __kName(el).toLowerCase().includes(q)));
     if (contains) return contains;
     // Fallback: any element whose own text matches → climb to a clickable ancestor.
-    const all = Array.from(document.querySelectorAll('*')).filter(
+    const all = __kDeepQueryAll('*').filter(
       (el) => (el.textContent || '').trim().toLowerCase() === q,
     );
     const ancestors = [];
@@ -110,7 +138,7 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
     const interactive =
       'a,button,[role="button"],[role="link"],[role="menuitem"],[role="tab"],' +
       'input[type="submit"],input[type="button"],[onclick],[tabindex]';
-    const all = Array.from(document.querySelectorAll(interactive));
+    const all = __kDeepQueryAll(interactive);
     const exact = all.filter((el) => __kName(el).toLowerCase() === q);
     const contains = all.filter(
       (el) => __kName(el).toLowerCase() !== q && __kName(el).toLowerCase().includes(q),
@@ -127,7 +155,7 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
     let list = rank(exact).concat(rank(contains));
     if (!list.length) {
       // Fallback: any element whose own text matches → nearest clickable ancestor.
-      const textEls = Array.from(document.querySelectorAll('*')).filter(
+      const textEls = __kDeepQueryAll('*').filter(
         (el) => (el.textContent || '').trim().toLowerCase() === q,
       );
       const anc = [];
@@ -142,11 +170,7 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
   function __kResolveCandidates(sel) {
     const tq = __kParseTextQuery(sel);
     if (tq != null) return __kFindCandidates(tq);
-    try {
-      return Array.from(document.querySelectorAll(sel));
-    } catch (e) {
-      return [];
-    }
+    return __kDeepQueryAll(sel);
   }
   window.__kResolveCandidates = __kResolveCandidates;
   // Single-element resolve (used by fill-helper). First clickable candidate.
@@ -279,43 +303,66 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
           };
         }
 
+        // TWO passes. Pass 1 prefers a candidate that wins the hit test (the
+        // one a human would actually be clicking). Pass 2 accepts any merely
+        // RENDERABLE candidate — because we dispatch the click sequence ON THE
+        // ELEMENT, not at coordinates, so an overlay/sticky layer covering it
+        // does not actually block the click; the hit test is a preference, not
+        // a precondition. Without pass 2, overlay-heavy apps (LinkedIn) fail
+        // every click with "is not visible" even though the control is live.
+        let relaxed = false;
         for (const candidate of candidates) {
           candidate.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
           await new Promise((resolve) => setTimeout(resolve, 100));
           if (!isElementVisible(candidate)) continue; // try the next match
 
           element = candidate;
-          const rect = element.getBoundingClientRect();
-          elementInfo = {
-            tagName: element.tagName,
-            id: element.id,
-            className: element.className,
-            text: element.textContent?.trim().substring(0, 100) || '',
-            href: element.href || null,
-            type: element.type || null,
-            isVisible: true,
-            rect: {
-              x: rect.x,
-              y: rect.y,
-              width: rect.width,
-              height: rect.height,
-              top: rect.top,
-              right: rect.right,
-              bottom: rect.bottom,
-              left: rect.left,
-            },
-            clickMethod: 'selector',
-          };
-          clickX = rect.left + rect.width / 2;
-          clickY = rect.top + rect.height / 2;
           break;
+        }
+        if (!element) {
+          for (const candidate of candidates) {
+            if (!__kRenderable(candidate)) continue;
+            candidate.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            if (!__kRenderable(candidate)) continue; // re-check after scroll
+            element = candidate;
+            relaxed = true;
+            break;
+          }
         }
 
         if (!element) {
           return {
-            error: `Element with selector "${selector}" is not visible`,
+            error:
+              `Element with selector "${selector}" was found but is not rendered ` +
+              `(hidden, zero-size, or removed). Try a different visible label, or scroll it into view first.`,
           };
         }
+
+        const rect = element.getBoundingClientRect();
+        elementInfo = {
+          tagName: element.tagName,
+          id: element.id,
+          className: element.className,
+          text: element.textContent?.trim().substring(0, 100) || '',
+          href: element.href || null,
+          type: element.type || null,
+          isVisible: true,
+          coveredByOverlay: relaxed,
+          rect: {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            left: rect.left,
+          },
+          clickMethod: 'selector',
+        };
+        clickX = rect.left + rect.width / 2;
+        clickY = rect.top + rect.height / 2;
       }
 
       let navigationPromise;
@@ -492,7 +539,16 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
     const elementAtPoint = document.elementFromPoint(centerX, centerY);
     if (!elementAtPoint) return false;
 
-    return element === elementAtPoint || element.contains(elementAtPoint);
+    // Accept the target itself, a DESCENDANT (we aimed at a wrapper and hit its
+    // inner span), or an ANCESTOR (we aimed at the label span but it has
+    // pointer-events:none, so the hit lands on the button that owns the
+    // handler). The ancestor case is the norm on sites with hashed classes —
+    // rejecting it made real, clickable controls read as "not visible".
+    return (
+      element === elementAtPoint ||
+      element.contains(elementAtPoint) ||
+      elementAtPoint.contains(element)
+    );
   }
 
   // Listen for messages from the extension

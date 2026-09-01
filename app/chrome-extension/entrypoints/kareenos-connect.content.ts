@@ -11,7 +11,10 @@
 // patterns). White-label builds set it to the partner's Kareenos origin.
 // Default targets the platform domain + localhost for dev.
 
-const MATCHES = (import.meta.env.VITE_KAREENOS_MATCHES || 'https://*.sdnvision.services/*')
+const MATCHES = (
+  import.meta.env.VITE_KAREENOS_MATCHES ||
+  'https://kareenos.com/*,https://www.kareenos.com/*,https://*.sdnvision.services/*'
+)
   .split(',')
   .map((s: string) => s.trim())
   .filter(Boolean);
@@ -36,6 +39,11 @@ export default defineContentScript({
           session_id: payload.session_id || null,
           projectid: payload.projectid || null,
           accountid: payload.accountid || null,
+          userid: payload.userid || null,
+          // Readable labels for the popup (server includes these in the payload).
+          project_name: payload.project_name || null,
+          account_name: payload.account_name || null,
+          user_name: payload.user_name || null,
         })
         .catch(() => {
           /* background may be waking; the storage watcher will still pick it up if re-sent */

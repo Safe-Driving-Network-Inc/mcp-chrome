@@ -1,5 +1,5 @@
 /**
- * @fileoverview Cron Trigger Handler 测试 (P4-07)
+ * @fileoverview Cron trigger handler tests (P4-07)
  * @description
  * Tests for:
  * - Alarm scheduling on install

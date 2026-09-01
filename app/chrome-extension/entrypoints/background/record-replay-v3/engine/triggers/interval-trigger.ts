@@ -1,11 +1,11 @@
 /**
  * @fileoverview Interval Trigger Handler (M3.1)
  * @description
- * 使用 chrome.alarms 的 periodInMinutes 实现固定间隔触发。
+ * Implements fixed-interval firing using chrome.alarms' periodInMinutes.
  *
- * 策略：
- * - 每个触发器对应一个重复 alarm
- * - 使用 delayInMinutes 使首次触发在配置的间隔后
+ * Strategy:
+ * - One repeating alarm per trigger
+ * - delayInMinutes makes the first fire land one interval after installation
  */
 
 import type { TriggerId } from '../../domain/ids';
@@ -33,7 +33,7 @@ const ALARM_PREFIX = 'rr_v3_interval_';
 // ==================== Utilities ====================
 
 /**
- * 校验并规范化 periodMinutes
+ * Validate and normalize periodMinutes
  */
 function normalizePeriodMinutes(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -46,14 +46,14 @@ function normalizePeriodMinutes(value: unknown): number {
 }
 
 /**
- * 生成 alarm 名称
+ * Build the alarm name
  */
 function alarmNameForTrigger(triggerId: TriggerId): string {
   return `${ALARM_PREFIX}${triggerId}`;
 }
 
 /**
- * 从 alarm 名称解析 triggerId
+ * Parse the triggerId out of an alarm name
  */
 function parseTriggerIdFromAlarmName(name: string): TriggerId | null {
   if (!name.startsWith(ALARM_PREFIX)) return null;
@@ -64,7 +64,7 @@ function parseTriggerIdFromAlarmName(name: string): TriggerId | null {
 // ==================== Handler Implementation ====================
 
 /**
- * 创建 interval 触发器处理器工厂
+ * Create the interval trigger handler factory
  */
 export function createIntervalTriggerHandlerFactory(
   deps?: IntervalTriggerHandlerDeps,
@@ -73,7 +73,7 @@ export function createIntervalTriggerHandlerFactory(
 }
 
 /**
- * 创建 interval 触发器处理器
+ * Create the interval trigger handler
  */
 export function createIntervalTriggerHandler(
   fireCallback: TriggerFireCallback,
@@ -86,7 +86,7 @@ export function createIntervalTriggerHandler(
   let listening = false;
 
   /**
-   * 递增版本号以使挂起的操作失效
+   * Bump the version so pending operations become stale
    */
   function bumpVersion(triggerId: TriggerId): number {
     const next = (versions.get(triggerId) ?? 0) + 1;
@@ -95,7 +95,7 @@ export function createIntervalTriggerHandler(
   }
 
   /**
-   * 清除指定 alarm
+   * Clear a specific alarm
    */
   async function clearAlarmByName(name: string): Promise<void> {
     if (!chrome.alarms?.clear) return;
@@ -107,7 +107,7 @@ export function createIntervalTriggerHandler(
   }
 
   /**
-   * 清除所有 interval alarms
+   * Clear every interval alarm
    */
   async function clearAllIntervalAlarms(): Promise<void> {
     if (!chrome.alarms?.getAll || !chrome.alarms?.clear) return;
@@ -123,7 +123,7 @@ export function createIntervalTriggerHandler(
   }
 
   /**
-   * 调度 alarm
+   * Schedule the alarm
    */
   async function schedule(triggerId: TriggerId, expectedVersion: number): Promise<void> {
     if (!chrome.alarms?.create) {
@@ -138,8 +138,8 @@ export function createIntervalTriggerHandler(
     const periodInMinutes = entry.periodMinutes;
 
     try {
-      // 使用 delayInMinutes 和 periodInMinutes 创建重复 alarm
-      // 首次触发在 periodInMinutes 后，之后每隔 periodInMinutes 触发
+      // Create a repeating alarm with delayInMinutes and periodInMinutes
+      // The first fire lands after periodInMinutes, then it repeats on that interval
       await Promise.resolve(
         chrome.alarms.create(name, {
           delayInMinutes: periodInMinutes,
@@ -152,7 +152,7 @@ export function createIntervalTriggerHandler(
   }
 
   /**
-   * Alarm 事件处理
+   * Alarm event handling
    */
   const onAlarm = (alarm: chrome.alarms.Alarm): void => {
     const triggerId = parseTriggerIdFromAlarmName(alarm?.name ?? '');
@@ -161,7 +161,7 @@ export function createIntervalTriggerHandler(
     const entry = installed.get(triggerId);
     if (!entry) return;
 
-    // 触发回调
+    // Invoke the callback
     Promise.resolve(
       fireCallback.onFire(triggerId, {
         sourceTabId: undefined,
@@ -173,7 +173,7 @@ export function createIntervalTriggerHandler(
   };
 
   /**
-   * 确保正在监听 alarm 事件
+   * Make sure we are listening for alarm events
    */
   function ensureListening(): void {
     if (listening) return;
@@ -186,7 +186,7 @@ export function createIntervalTriggerHandler(
   }
 
   /**
-   * 停止监听 alarm 事件
+   * Stop listening for alarm events
    */
   function stopListening(): void {
     if (!listening) return;

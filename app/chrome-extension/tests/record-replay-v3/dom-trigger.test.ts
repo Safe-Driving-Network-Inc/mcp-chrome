@@ -1,5 +1,5 @@
 /**
- * @fileoverview DOM Trigger Handler 测试 (P4-06)
+ * @fileoverview DOM trigger handler tests (P4-06)
  * @description
  * Tests for:
  * - Syncing triggers to tabs (inject + set_dom_triggers)

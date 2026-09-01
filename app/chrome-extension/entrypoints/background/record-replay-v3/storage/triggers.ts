@@ -1,6 +1,6 @@
 /**
- * @fileoverview 触发器存储
- * @description 实现触发器的 CRUD 操作（Phase 4 完整实现）
+ * @fileoverview Trigger storage
+ * @description Implements the CRUD operations for triggers (full phase 4 implementation)
  */
 
 import type { TriggerId } from '../domain/ids';
@@ -9,7 +9,7 @@ import type { TriggersStore } from '../engine/storage/storage-port';
 import { RR_V3_STORES, withTransaction } from './db';
 
 /**
- * 创建 TriggersStore 实现
+ * Create the TriggersStore implementation
  */
 export function createTriggersStore(): TriggersStore {
   return {

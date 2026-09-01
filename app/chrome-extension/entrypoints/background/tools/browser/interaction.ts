@@ -24,6 +24,7 @@ interface ClickToolParams {
   modifiers?: { altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean };
   tabId?: number; // target existing tab id
   windowId?: number; // when no tabId, pick active tab from this window
+  laneId?: string; // which lane's tab to click in
 }
 
 /**
@@ -96,26 +97,51 @@ class ClickTool extends BaseBrowserToolExecutor {
         }
       }
 
-      await this.injectContentScript(tab.id, ['inject-scripts/click-helper.js']);
+      // Search every frame — dialogs/editors (and their buttons) commonly live
+      // in a same-origin child frame that a top-frame-only click never sees.
+      const frameIds = await this.listFrameIds(tab.id, frameId);
+      let result: any = null;
+      let lastError = '';
+      for (const fid of frameIds) {
+        try {
+          await this.injectContentScript(
+            tab.id,
+            ['inject-scripts/click-helper.js'],
+            false,
+            'ISOLATED',
+            false,
+            fid === undefined ? undefined : [fid],
+          );
+          const r = await this.sendMessageToTab(
+            tab.id,
+            {
+              action: TOOL_MESSAGE_TYPES.CLICK_ELEMENT,
+              selector: finalSelector,
+              coordinates,
+              ref: finalRef,
+              waitForNavigation,
+              timeout,
+              double: args.double === true,
+              button,
+              bubbles,
+              cancelable,
+              modifiers,
+            },
+            fid,
+          );
+          if (r && !r.error) {
+            result = r;
+            break;
+          }
+          lastError = (r && r.error) || lastError;
+        } catch (e) {
+          lastError = e instanceof Error ? e.message : String(e);
+        }
+      }
 
-      // Send click message to content script
-      const result = await this.sendMessageToTab(
-        tab.id,
-        {
-          action: TOOL_MESSAGE_TYPES.CLICK_ELEMENT,
-          selector: finalSelector,
-          coordinates,
-          ref: finalRef,
-          waitForNavigation,
-          timeout,
-          double: args.double === true,
-          button,
-          bubbles,
-          cancelable,
-          modifiers,
-        },
-        frameId,
-      );
+      if (!result) {
+        return createErrorResponse(lastError || 'No frame on this page contained that element');
+      }
 
       // Determine actual click method used
       let clickMethod: string;
@@ -164,6 +190,7 @@ interface FillToolParams {
   frameId?: number;
   tabId?: number; // target existing tab id
   windowId?: number; // when no tabId, pick active tab from this window
+  laneId?: string; // which lane's tab to fill in
 }
 
 /**
@@ -180,9 +207,12 @@ class FillTool extends BaseBrowserToolExecutor {
 
     console.log(`Starting fill operation with options:`, args);
 
-    if (!selector && !ref) {
-      return createErrorResponse(ERROR_MESSAGES.INVALID_PARAMETERS + ': Provide ref or selector');
-    }
+    // NOTE: selector/ref are OPTIONAL by design. With neither, fill-helper's
+    // __kResolveFillTarget targets the focused editable element (else the single
+    // visible editable box) — the auto-focused compose field case, which is how
+    // rich-text composers (LinkedIn, Gmail) are actually filled since their real
+    // editors are hashed-class contenteditables no selector can name. Guarding
+    // on selector here made that path unreachable dead code.
 
     if (value === undefined || value === null) {
       return createErrorResponse(ERROR_MESSAGES.INVALID_PARAMETERS + ': Value must be provided');
@@ -226,22 +256,45 @@ class FillTool extends BaseBrowserToolExecutor {
         }
       }
 
-      await this.injectContentScript(tab.id, ['inject-scripts/fill-helper.js']);
+      // Search every frame — rich-text composers commonly live in a same-origin
+      // child frame, where a top-frame-only fill finds no editable at all.
+      const frameIds = await this.listFrameIds(tab.id, frameId);
+      let result: any = null;
+      let lastError = '';
+      for (const fid of frameIds) {
+        try {
+          await this.injectContentScript(
+            tab.id,
+            ['inject-scripts/fill-helper.js'],
+            false,
+            'ISOLATED',
+            false,
+            fid === undefined ? undefined : [fid],
+          );
+          const r = await this.sendMessageToTab(
+            tab.id,
+            {
+              action: TOOL_MESSAGE_TYPES.FILL_ELEMENT,
+              selector: finalSelector,
+              ref: finalRef,
+              value,
+            },
+            fid,
+          );
+          if (r && !r.error) {
+            result = r;
+            break;
+          }
+          lastError = (r && r.error) || lastError;
+        } catch (e) {
+          lastError = e instanceof Error ? e.message : String(e);
+        }
+      }
 
-      // Send fill message to content script
-      const result = await this.sendMessageToTab(
-        tab.id,
-        {
-          action: TOOL_MESSAGE_TYPES.FILL_ELEMENT,
-          selector: finalSelector,
-          ref: finalRef,
-          value,
-        },
-        frameId,
-      );
-
-      if (result && result.error) {
-        return createErrorResponse(result.error);
+      if (!result) {
+        return createErrorResponse(
+          lastError || 'No frame on this page contained a fillable element',
+        );
       }
 
       return {

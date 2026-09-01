@@ -1,62 +1,68 @@
-# Chrome MCP Server Extension - Latest Release
+# Kareenos Extension — Latest Release
 
-## 🚀 快速安装
+The attended Browser Channel extension: lets your Kareenos K‑Agents read, click,
+fill, navigate and screenshot inside your own signed‑in browser — with you
+watching and in control.
 
-### 1. 下载扩展
+## Download
 
-下载 [chrome-mcp-server-latest.zip](/releases/chrome-extension/latest/chrome-mcp-server-lastest.zip)
+[kareenos-extension-latest.zip](/releases/chrome-extension/latest/kareenos-extension-latest.zip)
+(versioned copy: `kareenos-extension-1.0.0.zip`)
 
-### 2. 安装步骤
+## Install (load unpacked)
 
-1. 解压下载的 zip 文件
-2. 打开 Chrome 浏览器
-3. 地址栏输入 `chrome://extensions/`
-4. 开启右上角的"开发者模式"开关
-5. 点击"加载已解压的扩展程序"
-6. 选择解压后的文件夹
+1. Unzip the downloaded file.
+2. Open Chrome and go to `chrome://extensions/`.
+3. Turn on **Developer mode** (top‑right).
+4. Click **Load unpacked** and select the unzipped folder.
+5. Pin the **Kareenos** icon (the gold **K**) to your toolbar.
 
-### 3. 验证安装
+On a fresh install a **welcome page** opens automatically and walks you through
+connecting the extension to Kareenos.
 
-- 扩展图标应该出现在浏览器工具栏
-- 点击图标打开配置面板
-- 确认扩展状态显示正常
+## Connect to Kareenos
 
-## ⚙️ 配置说明
+1. Sign in to the Kareenos platform in this browser.
+2. Open **Kareenos → Connect Extension** (or click _Connect this browser_ on the
+   welcome page).
+3. Pick your project and click **Connect this browser** — a secure sign‑in binds
+   the extension to your account and project.
+4. The toolbar popup shows **Connected** with your project. Done.
 
-### Native Server 连接
+## Security
 
-1. 确保 Native Server 正在运行（默认端口 12306）
-2. 在扩展 popup 中输入正确的端口号
-3. 点击"连接"按钮测试连接
+- The extension makes an **outbound, encrypted** connection only — no local port,
+  no inbound connections, no native host.
+- Every action is scoped to your **account / project / user**. The extension can
+  never approve its own actions — sensitive clicks are approved **server‑side**.
+- Page content is treated as **data only**, never as instructions. Disconnect
+  anytime from the toolbar popup.
 
-## 🔧 故障排除
+## Build a fresh release
 
-### 常见问题
+```
+pnpm release:extension      # from the repo root
+```
 
-1. **扩展无法加载**
+One command: installs, builds `chrome-mcp-shared`, wipes `.output`, runs
+`wxt zip`, verifies the archive, and publishes `kareenos-extension-latest.zip` to
+all three destinations —
 
-   - 确保已开启开发者模式
-   - 检查文件夹结构是否完整
+1. `releases/chrome-extension/latest/` (here)
+2. `../kareenos_frontend/public/releases/chrome-extension/latest/` — **commit this
+   one**; Quasar copies `public/` verbatim into the build
+3. `../expressserver/public/kareenos_com/releases/chrome-extension/latest/` — skips
+   the Quasar rebuild; goes live when `expressserver/public` is deployed as usual
 
-2. **无法连接 Native Server**
+Set `VITE_KAREENOS_CONNECT_URL` / `VITE_BROWSER_CHANNEL_URL` in
+`app/chrome-extension/.env.local` for the target environment **before** building so
+the popup/welcome page point at the right server. The script prints the values it
+is about to compile in — read that block before letting the build proceed, because
+a wrong URL fails silently in the user's browser, not at build time.
 
-   - 确认 Native Server 正在运行
-   - 检查端口号是否正确
-   - 查看浏览器控制台错误信息
+Flags: `--no-install` (skip `pnpm install`), `--keep-output` (keep `.output`).
+Sibling repo paths override with `FRONTEND_DIR=` / `EXPRESS_DIR=`.
 
-3. **功能异常**
-   - 刷新页面重试
-   - 重启浏览器
-   - 重新加载扩展
-
-## 📞 技术支持
-
-遇到问题请：
-
-1. 查看浏览器控制台错误信息
-2. 在 GitHub Issues 中搜索相似问题
-3. 提交新的 Issue 并附上详细信息
-
-## ⚠️ 安全提醒
-
-- 此扩展具有较高权限，请确保从可信来源下载
+The release version comes from `app/chrome-extension/package.json` — WXT derives
+the manifest version from it, and the script aborts if the two ever disagree. Bump
+it there when you want a new version number.
