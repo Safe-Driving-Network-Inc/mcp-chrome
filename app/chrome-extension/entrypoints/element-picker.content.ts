@@ -194,8 +194,13 @@ export default defineContentScript({
     // Register message listener
     chrome.runtime.onMessage.addListener(handleMessage);
 
-    // Cleanup on page unload
-    window.addEventListener('unload', () => {
+    // Cleanup when the page is torn down. 'pagehide' rather than 'unload':
+    // Chrome's permissions policy now blocks 'unload' on pages that opt out
+    // (our own /shared-agent pages do), which logged a violation on every
+    // load. Skip the back/forward-cache case — the page may come back and
+    // still needs its listener.
+    window.addEventListener('pagehide', (event) => {
+      if (event.persisted) return;
       chrome.runtime.onMessage.removeListener(handleMessage);
       controller?.dispose();
       controller = null;

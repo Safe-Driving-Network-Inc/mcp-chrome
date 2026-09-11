@@ -89,8 +89,22 @@ body {
 .kc-dot.kc-disconnected {
   background: var(--kn-idle);
 }
-.kc-dot.kc-error {
-  background: var(--kn-err);
+.kc-dot.kc-signed_out {
+  background: var(--kn-idle);
+}
+.kc-dot.kc-superseded {
+  background: var(--kn-warn);
+  box-shadow: 0 0 0 3px rgba(234, 179, 8, 0.18);
+}
+/* No token: the identity rows are a memory of the last sign-in, not a session. */
+.kc-row.kc-stale .kc-v {
+  color: var(--kn-ink-soft);
+  font-weight: 400;
+  text-decoration: line-through;
+  text-decoration-color: var(--kn-line);
+}
+.kc-btn[hidden] {
+  display: none;
 }
 .kc-row {
   display: flex;

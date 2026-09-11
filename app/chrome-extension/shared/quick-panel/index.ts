@@ -96,9 +96,9 @@ const LOG_PREFIX = '[QuickPanelController]';
  *   }
  * });
  *
- * // Cleanup on extension unload
- * window.addEventListener('unload', () => {
- *   quickPanel.dispose();
+ * // Cleanup on page teardown ('unload' is blocked by permissions policy)
+ * window.addEventListener('pagehide', (e) => {
+ *   if (!e.persisted) quickPanel.dispose();
  * });
  * ```
  */

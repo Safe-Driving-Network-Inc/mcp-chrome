@@ -48,6 +48,11 @@ export default defineConfig({
     default_locale: 'en',
     // Kareenos branding — literal (locale-independent) name/description.
     name: 'Kareenos Extension',
+    // The browser channel keeps the MV3 service worker alive with WebSocket
+    // traffic (a 20s ping); Chrome resets the worker's idle timer on WebSocket
+    // activity only from 116 (Aug 2023). Older Chrome would drop the channel
+    // every ~30s idle, so refuse to install there.
+    minimum_chrome_version: '116',
     description:
       'Kareenos attended browser channel — lets your Kareenos agents read and act in your signed-in browser, on your behalf.',
     permissions: [

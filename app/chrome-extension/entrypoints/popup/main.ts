@@ -1,23 +1,40 @@
 // Kareenos Browser Channel — minimal popup (P1.5).
 //
 // This is a commanded target, not an app: the popup shows connection state and
-// the bound account/project, and offers Sign in / Disconnect. No automation UI.
+// the bound account/project, and offers Sign in / Sign out. No automation UI.
 // Deliberately framework-free (no Vue, no native-messaging, no agent theme).
+//
+// Truthfulness rule (2026-08-31): the popup never touches the token itself — the
+// background owns it. `signed_out` means there is NO token (the account/project
+// rows are greyed: they are a memory, not a session); `disconnected` means the
+// token is there and the client is reconnecting by itself; `superseded` means
+// another browser bound the same project and this one is parked until the user
+// says "Use this browser".
 import './style.css';
 
-type ConnState = 'disconnected' | 'connecting' | 'bound' | 'error';
+type ConnState = 'signed_out' | 'disconnected' | 'connecting' | 'bound' | 'superseded';
 
 const CONNECT_URL_KEY = 'kareenos_connect_url';
-const TOKEN_KEY = 'kareenos_channel_token';
 const DEFAULT_CONNECT_URL =
   import.meta.env.VITE_KAREENOS_CONNECT_URL || 'https://kareenos.com/kareenos/connectextension';
 
 const STATE_LABEL: Record<ConnState, string> = {
-  disconnected: 'Disconnected',
+  signed_out: 'Signed out',
+  disconnected: 'Reconnecting…',
   connecting: 'Connecting…',
   bound: 'Connected',
-  error: 'Error',
+  superseded: 'Another browser took over',
 };
+
+interface StateInfo {
+  state: ConnState;
+  has_token?: boolean;
+  exp?: number | null;
+  renewable?: boolean;
+  bound_since?: number | null;
+  last_error?: string | null;
+  superseded_by?: any;
+}
 
 const app = document.getElementById('app')!;
 app.innerHTML = `
@@ -29,7 +46,8 @@ app.innerHTML = `
     <div class="kc-row"><span class="kc-k">User</span><span class="kc-v" id="kc-user">—</span></div>
     <div class="kc-actions">
       <button id="kc-signin" class="kc-btn kc-primary">Sign in</button>
-      <button id="kc-disconnect" class="kc-btn">Disconnect</button>
+      <button id="kc-takeover" class="kc-btn kc-primary" hidden>Use this browser</button>
+      <button id="kc-disconnect" class="kc-btn">Sign out</button>
     </div>
     <div class="kc-learn">
       <div class="kc-learn-head">Learn mode</div>
@@ -45,9 +63,54 @@ app.innerHTML = `
 
 const $ = (id: string) => document.getElementById(id)!;
 
+let lastInfo: StateInfo = { state: 'signed_out' };
+
+function fmtDate(epochSec: number): string {
+  try {
+    return new Date(epochSec * 1000).toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  } catch (e) {
+    return '';
+  }
+}
+
 function renderState(state: ConnState) {
+  renderInfo({ ...lastInfo, state });
+}
+
+function renderInfo(info: StateInfo) {
+  lastInfo = info;
+  const state = info.state;
   $('kc-status').textContent = STATE_LABEL[state] || state;
   $('kc-dot').className = 'kc-dot kc-' + state;
+  const hasToken = info.has_token !== false && state !== 'signed_out';
+  // No token ⇒ the identity rows are a memory of the last sign-in, not a session.
+  document.querySelectorAll('.kc-row').forEach((el) => el.classList.toggle('kc-stale', !hasToken));
+  ($('kc-signin') as HTMLButtonElement).hidden = hasToken && state !== 'superseded';
+  ($('kc-signin') as HTMLButtonElement).textContent = hasToken ? 'Sign in again' : 'Sign in';
+  ($('kc-takeover') as HTMLButtonElement).hidden = state !== 'superseded';
+  ($('kc-disconnect') as HTMLButtonElement).hidden = !hasToken;
+  let note = '';
+  if (state === 'bound') {
+    note = 'Agents can act in this browser. Stays connected across restarts';
+    if (info.renewable === false && info.exp) note += ' — sign in again before ' + fmtDate(info.exp);
+    note += '.';
+  } else if (state === 'disconnected' || state === 'connecting') {
+    note = 'Signed in — reconnecting automatically.' + (info.last_error ? ' (' + info.last_error + ')' : '');
+  } else if (state === 'superseded') {
+    const by = info.superseded_by && info.superseded_by.display_name;
+    note =
+      (by ? by : 'Another browser') +
+      ' connected to the same project. Click “Use this browser” to take the channel back here.';
+  } else if (state === 'signed_out') {
+    note = info.last_error
+      ? 'Sign in to connect (' + info.last_error + ').'
+      : 'Sign in to connect this browser to a Kareenos project.';
+  }
+  $('kc-note').textContent = note;
 }
 
 function shorten(s: string): string {
@@ -93,14 +156,20 @@ $('kc-signin').addEventListener('click', async () => {
   window.close();
 });
 
+// Sign out: the background clears the token (locally first, then revokes the
+// session server-side over the socket or the HTTP fallback). The popup only asks.
 $('kc-disconnect').addEventListener('click', async () => {
-  try {
-    await chrome.storage.session.remove(TOKEN_KEY);
-  } catch (e) {
-    /* ignore */
-  }
-  chrome.runtime.sendMessage({ type: 'browser_channel_disconnect' }).catch(() => {});
-  renderState('disconnected');
+  $('kc-note').textContent = 'Signing out…';
+  const res: any = await chrome.runtime
+    .sendMessage({ type: 'browser_channel_sign_out' })
+    .catch(() => null);
+  renderInfo({ state: 'signed_out', has_token: false, last_error: res && res.ok ? null : 'sign-out request failed' });
+});
+
+// Take the channel back from another browser bound to the same project.
+$('kc-takeover').addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({ type: 'browser_channel_take_over' }).catch(() => null);
+  renderInfo({ ...lastInfo, state: 'connecting', superseded_by: null });
 });
 
 // ---------------------------------------------------------------------------
@@ -157,9 +226,13 @@ async function renderLearnStatus() {
   }
 }
 
-// Live state updates pushed by the background client.
+// Live state updates pushed by the background client. Re-query the full info
+// so exp/last_error stay accurate (the push carries only the state).
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.type === 'browser_channel_state') renderState(msg.state);
+  if (msg && msg.type === 'browser_channel_state') {
+    renderState(msg.state);
+    refreshInfo();
+  }
   if (msg && msg.type === 'learn_macro_ack') {
     $('kc-learn-note').textContent = msg.ok
       ? 'Saved ✓ — agents can now fetch this macro by title.'
@@ -167,10 +240,21 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
-// Initial paint.
-chrome.runtime
-  .sendMessage({ type: 'browser_channel_get_state' })
-  .then((res: any) => renderState((res && res.state) || 'disconnected'))
-  .catch(() => renderState('disconnected'));
+async function refreshInfo(): Promise<StateInfo> {
+  const res: any = await chrome.runtime
+    .sendMessage({ type: 'browser_channel_get_state' })
+    .catch(() => null);
+  const info: StateInfo = res && res.state ? res : { state: 'signed_out', has_token: false };
+  renderInfo(info);
+  return info;
+}
+
+// Initial paint — and if we hold a token but are not bound, nudge the background
+// to reconnect right now rather than waiting for its next alarm tick.
+refreshInfo().then((info) => {
+  if (info.has_token && info.state !== 'bound' && info.state !== 'superseded' && info.state !== 'connecting') {
+    chrome.runtime.sendMessage({ type: 'browser_channel_reconnect' }).catch(() => {});
+  }
+});
 renderBound();
 renderLearnStatus();

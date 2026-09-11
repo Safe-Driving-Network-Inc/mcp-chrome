@@ -4,7 +4,7 @@
 // (served by the backend) posts a window message
 //   { source: 'kareenos-browser-channel', ok: true, data: { token, session_id, projectid } }
 // This script captures it and relays it to the background, which stores the
-// short-lived token and connects. This is the robust capture path (independent
+// channel token (durable, renewed by the server on every bind) and connects. This is the robust capture path (independent
 // of opener topology); externally_connectable is a parallel direct path.
 //
 // Origin is build-time config: VITE_KAREENOS_MATCHES (comma-separated match
@@ -46,7 +46,7 @@ export default defineContentScript({
           user_name: payload.user_name || null,
         })
         .catch(() => {
-          /* background may be waking; the storage watcher will still pick it up if re-sent */
+          /* background may be waking; the user can click Connect again — the token is one-shot per page load */
         });
     });
   },

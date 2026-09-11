@@ -14,6 +14,8 @@ const CONNECT_URL_KEY = 'kareenos_connect_url';
 const logoUrl = ref<string>('');
 const connectUrl = ref<string>(DEFAULT_CONNECT_URL);
 const connected = ref<boolean>(false);
+// 'signed_out' | 'disconnected' | 'connecting' | 'bound' | 'superseded'
+const channelState = ref<string>('signed_out');
 const boundAccount = ref<string>('');
 const boundProject = ref<string>('');
 
@@ -31,8 +33,8 @@ const steps = [
     body: 'Pick the project and click “Connect this browser”. A secure sign-in binds this extension to your account and project — no passwords are stored in the extension.',
   },
   {
-    title: 'You’re connected',
-    body: 'The toolbar icon shows “Connected” with your project. Pin the Kareenos icon so you can always see the status. Your K-Agents can now read, click, fill and screenshot in this browser — and you stay in control.',
+    title: 'You’re connected — and stay connected',
+    body: 'The toolbar icon shows “Connected” with your project. Pin the Kareenos icon so you can always see the status. The connection survives browser restarts, sleep and network drops; only “Sign out” ends it. Your K-Agents can now read, click, fill and screenshot in this browser — and you stay in control.',
   },
 ];
 
@@ -48,6 +50,7 @@ async function resolveConnectUrl(): Promise<string> {
 async function refreshState() {
   try {
     const res: any = await chrome.runtime.sendMessage({ type: 'browser_channel_get_state' });
+    channelState.value = (res && res.state) || 'signed_out';
     connected.value = !!res && res.state === 'bound';
   } catch {
     /* background may be asleep */
@@ -77,6 +80,7 @@ onMounted(async () => {
   // Live status updates from the background client.
   chrome.runtime.onMessage.addListener((msg: any) => {
     if (msg && msg.type === 'browser_channel_state') {
+      channelState.value = msg.state;
       connected.value = msg.state === 'bound';
       if (msg.state === 'bound') refreshState();
     }
@@ -100,7 +104,14 @@ onMounted(async () => {
 
       <div v-if="connected" class="kw-banner kw-ok">
         ✓ Connected{{ boundProject ? ` — project ${boundProject}` : '' }}. You’re all set. You can
-        close this tab.
+        close this tab. The extension stays connected across browser restarts until you sign out.
+      </div>
+      <div v-else-if="channelState === 'disconnected' || channelState === 'connecting'" class="kw-banner">
+        Signed in — reconnecting to Kareenos… no action needed.
+      </div>
+      <div v-else-if="channelState === 'superseded'" class="kw-banner">
+        Another browser is connected to the same project. Open the toolbar popup and click “Use this
+        browser” to take the channel back here.
       </div>
 
       <ol class="kw-steps">
@@ -132,7 +143,8 @@ onMounted(async () => {
           >
           <li
             >Page content is treated as <strong>data only</strong>, never as instructions. You can
-            disconnect anytime from the toolbar popup.</li
+            sign out anytime from the toolbar popup — that revokes this browser's access
+            immediately, server-side.</li
           >
         </ul>
       </section>
