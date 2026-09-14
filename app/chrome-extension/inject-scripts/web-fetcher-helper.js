@@ -2720,25 +2720,32 @@ if (window.__WEB_FETCHER_HELPER_INITIALIZED__) {
       try {
         // If selector is specified, only get content from the matching element
         if (request.selector) {
-          const element = deepQuerySelector(request.selector);
+          // text=Label / :has-text() resolve through k-dom-core when it is
+          // loaded in this frame; plain CSS goes through the deep (shadow) query.
+          let element = null;
+          const core = window.__K_DOM_CORE__;
+          if (core && typeof core.parseTextQuery === 'function' && core.parseTextQuery(request.selector) != null && typeof core.bestElement === 'function') {
+            element = core.bestElement(request.selector, 'any');
+          } else {
+            element = deepQuerySelector(request.selector);
+          }
           if (element) {
-            // Directly get the text content of the element
-            const textContent = element.innerText;
-
+            const textContent = cleanContent(element.innerText || element.textContent || '');
             sendResponse({
               success: true,
               textContent: textContent,
               selector: request.selector,
+              selectorMatched: true,
             });
           } else {
-            // Selector didn't match — LinkedIn and other apps use hashed/dynamic
-            // class names, so a guessed selector often misses. Don't dead-end the
-            // agent with a hard error; return the full visible page text instead.
+            // Not in THIS frame. The tool searches the other frames and only
+            // fails when none matches — the old "here is the whole page anyway"
+            // reply made a child-frame selector unreachable and undetectable.
             sendResponse({
-              success: true,
-              textContent: cleanContent(document.body ? document.body.innerText : ''),
+              success: false,
               selector: request.selector,
               selectorMatched: false,
+              error: { code: 'NOT_FOUND', message: `No element matches "${request.selector}" in this frame`, details: { selector: request.selector } },
             });
           }
         } else {
@@ -2751,12 +2758,10 @@ if (window.__WEB_FETCHER_HELPER_INITIALIZED__) {
           // Readability's article only as optional metadata for genuine articles.
           const bodyText = cleanContent(document.body ? document.body.innerText : '');
 
-          // Append iframe content if present.
-          const iframeContent = extractIframeContent();
+          // Child frames are read per-frame by the tool (each labelled
+          // `--- frame f<id>: <url> ---`); inlining same-origin iframe text here
+          // as well listed it twice.
           let fullContent = bodyText;
-          if (iframeContent && iframeContent.trim().length > config.minTextLength) {
-            fullContent += '\n\n--- Embedded Content ---\n\n' + iframeContent;
-          }
 
           // Append OPEN shadow-root content: body.innerText does NOT include it,
           // so a dialog rendered inside a shadow root (LinkedIn's composer under
@@ -3002,10 +3007,19 @@ if (window.__WEB_FETCHER_HELPER_INITIALIZED__) {
    * @param {string} text - The text to clean
    * @returns {string} - Cleaned text
    */
+  // Keep LINE structure: lists, tables and menus are only readable — and only
+  // disambiguable ("which 'Message' button?") — when items stay on their own
+  // lines. Collapse horizontal whitespace, squeeze blank runs, trim lines.
   function cleanContent(text) {
-    return text
-      .replace(/\s+/g, ' ')
-      .replace(/\n\s*\n/g, '\n\n')
+    return String(text || '')
+      .replace(/\r\n?/g, '\n')
+      .replace(/[ \t\f\v\u00a0]+/g, ' ')
+      .split('\n')
+      .map(function (l) {
+        return l.trim();
+      })
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
       .trim()
       .substring(0, config.maxTotalLength);
   }

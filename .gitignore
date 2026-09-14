@@ -32,6 +32,10 @@ dist
 .env.local
 .env.*.local
 
+# Extension signing keypair (the PUBLIC half is compiled into wxt.config.ts;
+# the private .pem is only needed for Web Store packaging — never commit it)
+keys/
+
 # Prevent npm metadata pollution
 false/
 metadata-v1.3/

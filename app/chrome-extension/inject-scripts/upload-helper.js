@@ -227,9 +227,9 @@ if (window.__UPLOAD_HELPER_INITIALIZED__) {
     }
   }
 
-  async function uploadFile(selector, base64Data, fileName, mimeType) {
+  async function uploadFile(selector, base64Data, fileName, mimeType, ref, expectEpoch) {
     try {
-      if (!selector) return { error: 'selector is required' };
+      if (!selector && !ref) return { error: { code: 'NOT_FOUND', message: 'ref or selector is required' } };
       if (!base64Data) return { error: 'base64Data is required' };
       const name = fileName || 'uploaded-file';
       const mime = mimeType || 'application/octet-stream';
@@ -238,10 +238,19 @@ if (window.__UPLOAD_HELPER_INITIALIZED__) {
       try {
         file = __upDecode(base64Data, name, mime);
       } catch (e) {
-        return { error: `Could not decode file data: ${e.message}` };
+        return { error: { code: 'EXECUTION_ERROR', message: `Could not decode file data: ${e.message}` } };
       }
 
-      const candidates = __upResolveCandidates(selector);
+      // A ref (from browser_snapshot) names ONE element in this frame — it may
+      // be the file input itself, the button that owns it, or a drop zone.
+      let candidates;
+      if (ref && typeof window.__kResolveRef === 'function') {
+        const res = window.__kResolveRef(ref, expectEpoch);
+        if (res && res.error) return res;
+        candidates = [res.el];
+      } else {
+        candidates = __upResolveCandidates(selector);
+      }
 
       // 1) PRIMARY — find the real file input behind the selector.
       let input = null;
@@ -303,15 +312,14 @@ if (window.__UPLOAD_HELPER_INITIALIZED__) {
         // Report what the PAGE actually contains, so the caller can tell
         // "wrong selector" apart from "the input does not exist yet".
         const total = __upAllFileInputs().length;
-        return {
-          error:
-            total === 0
-              ? `This page currently has NO file input anywhere (shadow DOM included), so there is nothing to upload into yet. ` +
-                `Most sites create it only when you open their media/attachment step: click the composer's photo / attach / "Add media" button ONCE (a synthetic click cannot open the OS file dialog, so this is safe and just reveals the picker), then call browser_upload again with selector "input[type=file]". ` +
-                `If the upload area is a drop zone with no input, target its visible text instead (text=Drag and drop).`
-              : `Selector "${selector}" matched nothing, but this page has ${total} file input(s). ` +
-                `Retry with selector "input[type=file]", or target the upload control by its visible text (text=...).`,
-        };
+        const message =
+          total === 0
+            ? `This page currently has NO file input anywhere (shadow DOM included), so there is nothing to upload into yet. ` +
+              `Most sites create it only when you open their media/attachment step: click the composer's photo / attach / "Add media" button ONCE (a synthetic click cannot open the OS file dialog, so this is safe and just reveals the picker), then take a browser_snapshot and upload into the filechooser ref, or call browser_upload again with selector "input[type=file]". ` +
+              `If the upload area is a drop zone with no input, target its visible text instead (text=Drag and drop).`
+            : `${ref ? 'Ref ' + ref : 'Selector "' + selector + '"'} matched no upload control, but this page has ${total} file input(s). ` +
+              `Retry with selector "input[type=file]", or take a browser_snapshot and use the filechooser ref.`;
+        return { error: { code: 'NOT_FOUND', message, details: { selector: selector || null, ref: ref || null, file_inputs: total } } };
       }
       __upSimulateDrop(dropTarget, file);
       return {
@@ -326,14 +334,14 @@ if (window.__UPLOAD_HELPER_INITIALIZED__) {
         elementInfo: __upElementInfo(dropTarget),
       };
     } catch (error) {
-      return { error: `Error uploading file: ${error.message}` };
+      return { error: { code: 'EXECUTION_ERROR', message: `Error uploading file: ${error.message}` } };
     }
   }
 
   // Listen for messages from the extension
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     if (request.action === 'uploadFile') {
-      uploadFile(request.selector, request.base64Data, request.fileName, request.mimeType)
+      uploadFile(request.selector, request.base64Data, request.fileName, request.mimeType, request.ref, request.expect_epoch)
         .then(sendResponse)
         .catch((error) => {
           sendResponse({ error: `Unexpected error: ${error.message}` });

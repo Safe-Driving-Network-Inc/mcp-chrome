@@ -6,6 +6,7 @@ import {
   DEFAULT_LANE,
 } from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
+import { postNavigationSettle } from '../settle';
 
 // Default window dimensions
 const DEFAULT_WINDOW_WIDTH = 1280;
@@ -177,6 +178,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
 
           const updatedTab = await chrome.tabs.get(channelTab.id);
           await this.triggerAutoCapture(updatedTab.id!, updatedTab.url);
+          const settle = await postNavigationSettle(channelTab.id, laneId).catch(() => undefined);
 
           return {
             content: [
@@ -188,6 +190,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
                   tabId: updatedTab.id,
                   windowId: updatedTab.windowId,
                   url: updatedTab.url,
+                  settle,
                 }),
               },
             ],
@@ -268,10 +271,12 @@ class NavigateTool extends BaseBrowserToolExecutor {
           );
 
           // This newly created tab becomes the lane's single tab the agent drives.
+          let settle: any;
           if (newTab.id) {
             await this.setChannelTab(newTab.id, laneId);
             await this.waitForTabLoad(newTab.id);
             await this.triggerAutoCapture(newTab.id, newTab.url);
+            settle = await postNavigationSettle(newTab.id, laneId).catch(() => undefined);
           }
 
           return {
@@ -284,6 +289,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
                   tabId: newTab.id,
                   windowId: targetWindow.id,
                   url: newTab.url,
+                  settle,
                 }),
               },
             ],

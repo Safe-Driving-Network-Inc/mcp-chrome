@@ -183,8 +183,19 @@ CFG_KEY="$(read_env_var CHROME_EXTENSION_KEY)"
 printf '    %-28s %s\n' "VITE_BROWSER_CHANNEL_URL" "${CFG_CHANNEL:-${C_YELLOW}(unset -> code fallback)${C_RESET}}"
 printf '    %-28s %s\n' "VITE_KAREENOS_CONNECT_URL" "${CFG_CONNECT:-${C_YELLOW}(unset -> code fallback)${C_RESET}}"
 printf '    %-28s %s\n' "VITE_KAREENOS_MATCHES" "${CFG_MATCHES:-${C_YELLOW}(unset -> wxt.config.ts default)${C_RESET}}"
-# never print the key itself
-printf '    %-28s %s\n' "CHROME_EXTENSION_KEY" "$([[ -n "$CFG_KEY" ]] && echo 'set (stable extension id)' || echo '(unset -> id changes per install)')"
+printf '    %-28s %s\n' "CHROME_EXTENSION_KEY" "$([[ -n "$CFG_KEY" ]] && echo 'set via env (white-label identity)' || echo '(unset -> Kareenos default in wxt.config.ts)')"
+
+# The extension ID is derived from the manifest key (env override, else the
+# Kareenos default compiled into wxt.config.ts). Stable across re-extracts since
+# 1.2.0 — print it so a release note / support ticket can name it.
+KEY_B64="$CFG_KEY"
+if [[ -z "$KEY_B64" ]]; then
+  KEY_B64="$(grep -A1 -E "^const KAREENOS_EXTENSION_PUBLIC_KEY" "$EXT_DIR/wxt.config.ts" | grep -oE "'[A-Za-z0-9+/=]+'" | tr -d "'" | head -n 1 || true)"
+fi
+if [[ -n "$KEY_B64" ]]; then
+  EXT_ID="$(node -e "const h=require('crypto').createHash('sha256').update(Buffer.from(process.argv[1],'base64')).digest('hex').slice(0,32);console.log(h.replace(/[0-9a-f]/g,c=>String.fromCharCode(97+parseInt(c,16))))" "$KEY_B64" 2>/dev/null || true)"
+  printf '    %-28s %s\n' "extension id" "${EXT_ID:-(could not derive)}"
+fi
 
 # The connect origin must appear in the externally_connectable matches or the
 # connect page's token never reaches the extension.

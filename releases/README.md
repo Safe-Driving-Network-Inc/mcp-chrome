@@ -7,7 +7,7 @@ watching and in control.
 ## Download
 
 [kareenos-extension-latest.zip](/releases/chrome-extension/latest/kareenos-extension-latest.zip)
-(versioned copy: `kareenos-extension-1.0.0.zip`)
+(one file, always the current version — there are no versioned copies)
 
 ## Install (load unpacked)
 
@@ -19,6 +19,16 @@ watching and in control.
 
 On a fresh install a **welcome page** opens automatically and walks you through
 connecting the extension to Kareenos.
+
+## Updating
+
+Extract the new zip over the folder Chrome loads from (or into a new folder) and
+press **Reload** on the Kareenos card — since 1.2.0 the extension carries a fixed
+identity (`jilgmlejdnbgbjpjnoamjgbadnmlfadh`), so the sign-in survives an update
+even when the folder moves. **Updating from a release before 1.2.0 is the one
+exception:** Chrome sees the new identity as a different extension. Press
+**Remove** on the old Kareenos card, **Load unpacked** on the new folder, and sign
+in once more.
 
 ## Connect to Kareenos
 

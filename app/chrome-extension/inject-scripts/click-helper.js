@@ -208,19 +208,30 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
       let clickX, clickY;
 
       if (ref && typeof ref === 'string') {
-        // Resolve element from weak map
+        // Resolve through k-dom-core when present (epoch-checked: STALE_REF /
+        // DETACHED come back as structured errors); the legacy map otherwise.
         let target = null;
-        try {
-          const map = window.__claudeElementMap;
-          const weak = map && map[ref];
-          target = weak && typeof weak.deref === 'function' ? weak.deref() : null;
-        } catch (e) {
-          // ignore
+        if (typeof window.__kResolveRef === 'function') {
+          const res = window.__kResolveRef(ref, options.expectEpoch);
+          if (res && res.error) return res;
+          target = res && res.el;
+        } else {
+          try {
+            const map = window.__claudeElementMap;
+            const weak = map && map[ref];
+            target = weak && typeof weak.deref === 'function' ? weak.deref() : null;
+          } catch (e) {
+            // ignore
+          }
         }
-
         if (!target || !(target instanceof Element)) {
           return {
-            error: `Element ref "${ref}" not found. Please call chrome_read_page first and ensure the ref is still valid.`,
+            error: { code: 'STALE_REF', message: `Element ref "${ref}" is not known in this frame — take a new browser_snapshot.`, details: { ref } },
+          };
+        }
+        if (target.disabled || target.getAttribute('aria-disabled') === 'true') {
+          return {
+            error: { code: 'DISABLED', message: `The element for ref "${ref}" is disabled — the page must enable it first.`, details: { ref } },
           };
         }
 
@@ -299,7 +310,7 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
         const candidates = __kResolveCandidates(selector);
         if (!candidates.length) {
           return {
-            error: `Element with selector "${selector}" not found`,
+            error: { code: 'NOT_FOUND', message: `Element with selector "${selector}" not found in this frame`, details: { selector } },
           };
         }
 
@@ -333,9 +344,13 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
 
         if (!element) {
           return {
-            error:
-              `Element with selector "${selector}" was found but is not rendered ` +
-              `(hidden, zero-size, or removed). Try a different visible label, or scroll it into view first.`,
+            error: {
+              code: 'NOT_VISIBLE',
+              message:
+                `Element with selector "${selector}" was found but is not rendered ` +
+                `(hidden, zero-size, or removed). Try a different visible label, or scroll it into view first.`,
+              details: { selector, candidates: candidates.length },
+            },
           };
         }
 
@@ -409,7 +424,7 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
       };
     } catch (error) {
       return {
-        error: `Error clicking element: ${error.message}`,
+        error: { code: 'EXECUTION_ERROR', message: `Error clicking element: ${error.message}` },
       };
     }
   }
@@ -566,6 +581,7 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
           bubbles: request.bubbles,
           cancelable: request.cancelable,
           modifiers: request.modifiers,
+          expectEpoch: request.expect_epoch,
         },
       )
         .then(sendResponse)

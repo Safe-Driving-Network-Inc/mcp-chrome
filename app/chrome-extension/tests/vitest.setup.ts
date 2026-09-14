@@ -13,6 +13,7 @@ if (typeof globalThis.chrome === 'undefined') {
   (globalThis as unknown as { chrome: object }).chrome = {
     runtime: {
       id: 'test-extension-id',
+      getManifest: vi.fn().mockReturnValue({ version: '0.0.0-test' }),
       sendMessage: vi.fn().mockResolvedValue(undefined),
       onMessage: {
         addListener: vi.fn(),
@@ -31,6 +32,20 @@ if (typeof globalThis.chrome === 'undefined') {
         set: vi.fn().mockResolvedValue(undefined),
         remove: vi.fn().mockResolvedValue(undefined),
       },
+      // Kareenos Browser Channel v2: lane tabs + RefBook live in storage.session
+      session: {
+        get: vi.fn().mockResolvedValue({}),
+        set: vi.fn().mockResolvedValue(undefined),
+        remove: vi.fn().mockResolvedValue(undefined),
+      },
+    },
+    scripting: {
+      executeScript: vi.fn().mockResolvedValue([]),
+    },
+    alarms: {
+      get: vi.fn().mockResolvedValue(undefined),
+      create: vi.fn(),
+      onAlarm: { addListener: vi.fn(), removeListener: vi.fn() },
     },
     tabs: {
       query: vi.fn().mockResolvedValue([]),
@@ -38,10 +53,12 @@ if (typeof globalThis.chrome === 'undefined') {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       update: vi.fn().mockResolvedValue({}),
       remove: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
       captureVisibleTab: vi.fn().mockResolvedValue('data:image/png;base64,'),
       onRemoved: { addListener: vi.fn(), removeListener: vi.fn() },
       onCreated: { addListener: vi.fn(), removeListener: vi.fn() },
       onUpdated: { addListener: vi.fn(), removeListener: vi.fn() },
+      onActivated: { addListener: vi.fn(), removeListener: vi.fn() },
     },
     webRequest: {
       onBeforeRequest: { addListener: vi.fn(), removeListener: vi.fn() },
@@ -49,6 +66,8 @@ if (typeof globalThis.chrome === 'undefined') {
       onErrorOccurred: { addListener: vi.fn(), removeListener: vi.fn() },
     },
     webNavigation: {
+      getAllFrames: vi.fn().mockResolvedValue([{ frameId: 0, parentFrameId: -1, url: 'https://example.com/' }]),
+      onBeforeNavigate: { addListener: vi.fn(), removeListener: vi.fn() },
       onCommitted: { addListener: vi.fn(), removeListener: vi.fn() },
       onDOMContentLoaded: { addListener: vi.fn(), removeListener: vi.fn() },
       onCompleted: { addListener: vi.fn(), removeListener: vi.fn() },

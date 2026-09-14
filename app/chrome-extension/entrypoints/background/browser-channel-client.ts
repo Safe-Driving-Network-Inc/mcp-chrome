@@ -34,7 +34,16 @@
 //  * bind_ack ok:false with a terminal reason, or close 4000/4003, clears the
 //    token and parks in `signed_out` — no retry storm with a dead token.
 //    Close 4001 (another browser took over) parks in `superseded` with NO
-//    automatic reconnect, so two Chrome profiles never flap.
+//    automatic reconnect, so two Chrome profiles never flap. Close 1000
+//    ('replaced') is the SAME session's older socket being retired after a
+//    re-bind elsewhere — a plain reconnectable close, never a park.
+//  * The token also slides WHILE CONNECTED (2026-09-14): the server pushes a
+//    `token` frame from its heartbeat when less than half the TTL is left, and
+//    answers a `renew` frame on demand. Before this, renewal happened only at
+//    bind, so a browser that stayed connected past the TTL held an EXPIRED token
+//    by the time it finally reconnected — the "signed out after a few hours"
+//    that survived the 08-31 rewrite (together with a 1 h TTL left in the
+//    server's config file).
 // initBrowserChannelClient() is called on every SW spin-up (background/index.ts).
 // ============================================================================
 
@@ -68,6 +77,9 @@ const PONG_TIMEOUT_MS = 10_000;
 const CONNECT_TIMEOUT_MS = 15_000;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
+// Ask the server for a fresh token when the one we hold expires within this
+// window and the bind_ack did not already renew it (older server / no exp).
+const RENEW_MARGIN_SEC = 7 * 86_400;
 
 // bind_ack reasons after which retrying the SAME token can never succeed.
 const TERMINAL_REASONS = new Set([
@@ -76,7 +88,6 @@ const TERMINAL_REASONS = new Set([
   'EXPIRED',
   'INCOMPLETE_TENANT',
   'REVOKED',
-  'MAX_AGE',
 ]);
 // Server close codes (mirrored in browser_channel_server.js / browser-channel-envelope.md).
 const CLOSE_SIGNED_OUT = 4000;
@@ -111,6 +122,8 @@ let backoffMs = BACKOFF_MIN_MS;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let connectInFlight: Promise<void> | null = null;
 let channelCache: ChannelRecord | null | undefined; // undefined = not read yet
+let channelLoadInFlight: Promise<ChannelRecord | null> | null = null;
+let channelLoadError: string | null = null; // last storage READ failure (not "no token")
 
 function setState(s: ConnState) {
   state = s;
@@ -128,6 +141,12 @@ export function getBrowserChannelState(): ConnState {
 
 function describeState() {
   const rec = channelCache || null;
+  let version: string | null = null;
+  try {
+    version = chrome.runtime.getManifest().version || null;
+  } catch (e) {
+    version = null;
+  }
   return {
     state,
     has_token: !!(rec && rec.token),
@@ -136,6 +155,7 @@ function describeState() {
     bound_since: boundSince,
     last_error: lastError,
     superseded_by: supersededBy,
+    version,
   };
 }
 
@@ -144,31 +164,44 @@ function describeState() {
 // ---------------------------------------------------------------------------
 async function getChannel(): Promise<ChannelRecord | null> {
   if (channelCache !== undefined) return channelCache;
-  let rec: ChannelRecord | null = null;
-  try {
-    const r = await chrome.storage.local.get(CHANNEL_KEY);
-    const v = r?.[CHANNEL_KEY];
-    if (v && typeof v.token === 'string' && v.token) rec = v as ChannelRecord;
-  } catch (e) {
-    /* ignore */
-  }
-  if (!rec) {
-    // One-time migration from the pre-2026-08-31 session-storage slot (only
-    // present if Chrome has not restarted since that build signed in).
+  if (channelLoadInFlight) return channelLoadInFlight;
+  channelLoadInFlight = (async () => {
+    let rec: ChannelRecord | null = null;
+    let readFailed = false;
     try {
-      const r = await chrome.storage.session.get(LEGACY_SESSION_TOKEN_KEY);
-      const t = r?.[LEGACY_SESSION_TOKEN_KEY];
-      if (typeof t === 'string' && t) {
-        rec = { token: t, exp: null, session_id: null, renewable: true };
-        await chrome.storage.local.set({ [CHANNEL_KEY]: rec });
-        await chrome.storage.session.remove(LEGACY_SESSION_TOKEN_KEY);
-      }
-    } catch (e) {
-      /* ignore */
+      const r = await chrome.storage.local.get(CHANNEL_KEY);
+      const v = r?.[CHANNEL_KEY];
+      if (v && typeof v.token === 'string' && v.token) rec = v as ChannelRecord;
+    } catch (e: any) {
+      // A storage READ failure is not "no token". Caching null here made one
+      // transient error a sticky "Signed out" for the worker's whole life.
+      readFailed = true;
+      channelLoadError = 'token read failed: ' + (e?.message || e);
+      lastError = channelLoadError;
     }
-  }
-  channelCache = rec;
-  return rec;
+    if (!rec && !readFailed) {
+      // One-time migration from the pre-2026-08-31 session-storage slot (only
+      // present if Chrome has not restarted since that build signed in).
+      try {
+        const r = await chrome.storage.session.get(LEGACY_SESSION_TOKEN_KEY);
+        const t = r?.[LEGACY_SESSION_TOKEN_KEY];
+        if (typeof t === 'string' && t) {
+          rec = { token: t, exp: null, session_id: null, renewable: true };
+          await chrome.storage.local.set({ [CHANNEL_KEY]: rec });
+          await chrome.storage.session.remove(LEGACY_SESSION_TOKEN_KEY);
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    if (readFailed) return null; // leave channelCache undefined: retry next time
+    channelLoadError = null;
+    channelCache = rec;
+    return rec;
+  })().finally(() => {
+    channelLoadInFlight = null;
+  });
+  return channelLoadInFlight;
 }
 
 // Persist a (new) token record. On storage failure the in-memory copy is kept —
@@ -253,16 +286,63 @@ export function sendUpstreamFrame(obj: any): boolean {
 // ---------------------------------------------------------------------------
 // Command execution (unchanged semantics)
 // ---------------------------------------------------------------------------
+// A tool that overruns its budget is answered with TIMEOUT right away (the
+// server's await would expire anyway) but the lane still waits for it to finish
+// (capped) before the next command, so a runaway action can never interleave
+// with the command that follows it.
+const OVERRUN_WAIT_CAP_MS = 60_000;
+
 async function executeCommand(cmd: CommandEnvelope) {
+  const startedAt = Date.now();
+  let call: { name: string; args: Record<string, any> };
   try {
-    const call = resolveToolCall(cmd);
-    const toolResult = await handleCallTool({ name: call.name, args: call.args });
-    send({ type: 'result', ...toResultEnvelope(cmd.action, cmd, toolResult as any) });
+    call = resolveToolCall(cmd);
   } catch (e: any) {
-    send({
-      type: 'result',
-      ...failureEnvelope(cmd, 'EXECUTION_ERROR', (e && e.message) || 'Tool execution failed'),
-    });
+    send({ type: 'result', ...failureEnvelope(cmd, 'EXECUTION_ERROR', (e && e.message) || 'Could not resolve the action') });
+    return;
+  }
+  const budget = Number(call.args.timeoutMs) || 15_000;
+  console.log(
+    `[BC] cmd ${cmd.command_id} lane=${cmd.lane_id || 'default'} action=${cmd.action} timeout_ms=${cmd.timeout_ms ?? 'n/a'} budget_ms=${budget}`,
+  );
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  const run = handleCallTool({ name: call.name, args: call.args });
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error('budget exceeded'));
+    }, budget + 500);
+  });
+  try {
+    const toolResult = await Promise.race([run, guard]);
+    const envelope = toResultEnvelope(cmd.action, cmd, toolResult as any);
+    console.log(
+      `[BC] result ${cmd.command_id} status=${envelope.status}` +
+        (envelope.status === 'failed' ? ` code=${envelope.errors[0] ? envelope.errors[0].code : 'n/a'}` : '') +
+        ` took=${Date.now() - startedAt}ms`,
+    );
+    send({ type: 'result', ...envelope });
+  } catch (e: any) {
+    if (timedOut) {
+      console.warn(`[BC] timeout ${cmd.command_id} after ${Date.now() - startedAt}ms (tool still running)`);
+      send({
+        type: 'result',
+        ...failureEnvelope(cmd, 'TIMEOUT', `The ${cmd.action} action did not finish within ${budget} ms in the browser.`, {
+          budget_ms: budget,
+          action: cmd.action,
+        }),
+      });
+      // keep the lane serialized: let the overrunning tool finish (capped)
+      await Promise.race([run.catch(() => undefined), new Promise((r) => setTimeout(r, OVERRUN_WAIT_CAP_MS))]);
+    } else {
+      send({
+        type: 'result',
+        ...failureEnvelope(cmd, 'EXECUTION_ERROR', (e && e.message) || 'Tool execution failed'),
+      });
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -349,7 +429,16 @@ function startPing(c: Conn) {
       clearConnTimers(c);
       return;
     }
-    if (c.ws.readyState !== WebSocket.OPEN) return;
+    if (c.ws.readyState !== WebSocket.OPEN) {
+      // CLOSING/CLOSED with no onclose delivered (seen after sleep): the old code
+      // returned here and left the client pinned at `bound` forever — popup said
+      // Connected while every agent saw the browser offline.
+      lastError = 'socket not open at ping (readyState ' + c.ws.readyState + ')';
+      detach(c);
+      setState('disconnected');
+      connect('ping-not-open');
+      return;
+    }
     try {
       c.ws.send(JSON.stringify({ type: 'ping' }));
     } catch (e) {
@@ -367,35 +456,57 @@ function startPing(c: Conn) {
   }, PING_INTERVAL_MS);
 }
 
+// Persist a server-issued token — from a bind_ack renewal, from the server's
+// heartbeat (`token` frame, pushed when < half the TTL is left) or in answer to
+// our `renew`. Never triggers a reconnect: the background is the sole writer and
+// the socket that delivered it is the one we keep using. A frame without a token
+// still updates exp/renewable (renewable:false = past the absolute max age).
+async function persistRenewal(frame: any): Promise<void> {
+  if (typeof frame.token === 'string' && frame.token) {
+    await persistChannel({
+      token: frame.token,
+      exp: typeof frame.exp === 'number' ? frame.exp : channelCache?.exp || null,
+      session_id: channelCache?.session_id || null,
+      renewable: frame.renewable !== false,
+    });
+  } else if (channelCache) {
+    channelCache = {
+      ...channelCache,
+      exp: typeof frame.exp === 'number' ? frame.exp : channelCache.exp || null,
+      renewable: frame.renewable !== false,
+    };
+    try {
+      await chrome.storage.local.set({ [CHANNEL_KEY]: channelCache });
+    } catch (e) {
+      /* ignore */
+    }
+  }
+}
+
+// Ask for a fresh token when the one we hold is close to its expiry and the
+// bind_ack did not already renew it (older server, or a record without exp).
+function maybeRequestRenewal(c: Conn) {
+  const rec = channelCache;
+  if (!rec || rec.renewable === false) return;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (!rec.exp || rec.exp - nowSec < RENEW_MARGIN_SEC) {
+    try {
+      c.ws.send(JSON.stringify({ type: 'renew' }));
+    } catch (e) {
+      /* the heartbeat renewal covers it */
+    }
+  }
+}
+
 function handleBindAck(c: Conn, frame: any) {
   if (c.connectTimer) {
     clearTimeout(c.connectTimer);
     c.connectTimer = null;
   }
   if (frame.ok) {
-    const done = (async () => {
-      if (typeof frame.token === 'string' && frame.token) {
-        // Sliding renewal — persist BEFORE declaring bound; a persist failure keeps
-        // the old (still valid) token in memory.
-        await persistChannel({
-          token: frame.token,
-          exp: typeof frame.exp === 'number' ? frame.exp : null,
-          session_id: channelCache?.session_id || null,
-          renewable: frame.renewable !== false,
-        });
-      } else if (channelCache) {
-        channelCache = {
-          ...channelCache,
-          exp: typeof frame.exp === 'number' ? frame.exp : channelCache.exp || null,
-          renewable: frame.renewable !== false,
-        };
-        try {
-          await chrome.storage.local.set({ [CHANNEL_KEY]: channelCache });
-        } catch (e) {
-          /* ignore */
-        }
-      }
-    })();
+    // Sliding renewal — persist BEFORE declaring bound; a persist failure keeps
+    // the old (still valid) token in memory.
+    const done = persistRenewal(frame);
     done.catch(() => {}).then(() => {
       if (current !== c) return;
       c.bound = true;
@@ -404,6 +515,7 @@ function handleBindAck(c: Conn, frame: any) {
       lastError = null;
       setState('bound');
       startPing(c);
+      maybeRequestRenewal(c);
       // We are live: flush any Learn Mode macros recorded while offline.
       // Dynamic import — learn-mode statically imports this module.
       import('./learn-mode')
@@ -463,6 +575,13 @@ async function connect(_why?: string): Promise<void> {
     const rec = await getChannel();
     const url = await getServerUrl();
     if (!rec || !rec.token || !url) {
+      if (channelCache === undefined && channelLoadError) {
+        // Storage could not be read — we do not KNOW there is no token. Stay
+        // recoverable instead of declaring signed_out (which stops all retries).
+        setState('disconnected');
+        scheduleReconnect();
+        return;
+      }
       setState('signed_out');
       return;
     }
@@ -522,6 +641,10 @@ async function connect(_why?: string): Promise<void> {
             c.pongDeadline = null;
           }
           break;
+        case 'token':
+          // Live sliding renewal (server heartbeat) or the answer to our `renew`.
+          persistRenewal(frame).catch(() => {});
+          break;
         case 'superseded':
           supersededBy = frame.by || {};
           break; // the 4001 close that follows parks us
@@ -560,7 +683,7 @@ async function storeSignIn(msg: any): Promise<void> {
   if (current) detach(current);
   await persistChannel({
     token: msg.token,
-    exp: null,
+    exp: typeof msg.exp === 'number' ? msg.exp : null,
     session_id: msg.session_id || null,
     renewable: true,
   });
@@ -634,9 +757,6 @@ export async function reconnectBrowserChannel() {
   setState('disconnected');
   await connect('manual');
 }
-export function disconnectBrowserChannel() {
-  signOut().catch(() => {});
-}
 
 // Leave `superseded` on explicit user intent (or a fresh browser launch).
 async function takeOver(): Promise<void> {
@@ -661,7 +781,19 @@ export function initBrowserChannelClient() {
   // Backstop: fires even after the worker was evicted (which kills the ping loop
   // and the backoff timer). 0.5 = 30s on Chrome ≥120; older Chrome clamps to 1 min.
   try {
-    chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
+    // create() replaces the alarm and restarts its period; on a machine that wakes
+    // the worker often, re-creating on every spin-up starved the backstop.
+    Promise.resolve(chrome.alarms.get(ALARM_NAME))
+      .then((existing) => {
+        if (!existing) chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
+      })
+      .catch(() => {
+        try {
+          chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
+        } catch (e) {
+          /* ignore */
+        }
+      });
     chrome.alarms.onAlarm.addListener((alarm) => {
       if (alarm.name === ALARM_NAME) nudge('alarm')();
     });
@@ -734,7 +866,7 @@ export function initBrowserChannelClient() {
         sendResponse({ ok: true });
         return;
       }
-      if (msg.type === 'browser_channel_sign_out' || msg.type === 'browser_channel_disconnect') {
+      if (msg.type === 'browser_channel_sign_out') {
         signOut()
           .catch(() => {})
           .then(() => sendResponse({ ok: true }));

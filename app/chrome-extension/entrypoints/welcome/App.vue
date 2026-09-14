@@ -50,8 +50,12 @@ async function resolveConnectUrl(): Promise<string> {
 async function refreshState() {
   try {
     const res: any = await chrome.runtime.sendMessage({ type: 'browser_channel_get_state' });
-    channelState.value = (res && res.state) || 'signed_out';
-    connected.value = !!res && res.state === 'bound';
+    // Only the background's own answer paints a state — a missed message (worker
+    // waking up) must not read as "signed out".
+    if (res && res.state) {
+      channelState.value = res.state;
+      connected.value = res.state === 'bound';
+    }
   } catch {
     /* background may be asleep */
   }

@@ -5,10 +5,19 @@
 //      platform RESULT envelope ({status, message, data, errors}).
 //
 // Authoritative contract: docs/platform-design/browser-channel-envelope.md.
-// The internal tool NAMES come from chrome-mcp-shared TOOL_NAMES.BROWSER.
+// The internal tool NAMES come from chrome-mcp-shared TOOL_NAMES (upstream
+// tools) and common/kareenos-tool-names (the v2 additions).
+//
+// v2 (2026-09-14): eleven actions. Every action's args are still rebuilt from an
+// explicit whitelist (never a spread of the command's args), but the whitelist
+// now carries the targeting vocabulary — ref / frame / nth / strict — plus the
+// per-command budget (timeoutMs) the server forwards, and errors come back
+// STRUCTURED ({code, message, details}) instead of one prose string.
 
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 import type { ToolResult } from './tool-handler';
+import { KAREENOS_TOOL_NAMES } from './kareenos-tool-names';
+import { parseStructuredError } from './browser-errors';
 
 export type BrowserAction =
   | 'navigate'
@@ -17,7 +26,11 @@ export type BrowserAction =
   | 'fill'
   | 'screenshot'
   | 'scroll'
-  | 'upload';
+  | 'upload'
+  | 'snapshot'
+  | 'wait'
+  | 'press'
+  | 'run_steps';
 
 export interface CommandEnvelope {
   command_id: string;
@@ -28,6 +41,16 @@ export interface CommandEnvelope {
   lane_id?: string | null;
   action: BrowserAction;
   args: Record<string, any>;
+  // The server's await window for this command (ms). The extension must answer
+  // BEFORE it expires, so tools get timeout_ms - TIMEOUT_MARGIN_MS as their budget.
+  timeout_ms?: number | null;
+}
+
+export interface ResultError {
+  code: string;
+  message: string;
+  severity: string;
+  details?: Record<string, any>;
 }
 
 export interface ResultEnvelope {
@@ -37,11 +60,36 @@ export interface ResultEnvelope {
   status: 'success' | 'failed';
   message: string;
   data: Record<string, any>;
-  errors: Array<{ code: string; message: string; severity: string }>;
+  errors: ResultError[];
 }
 
+// Per-action default await windows (ms). Mirrors TIMEOUT_MS in the backend's
+// browser_tools_help.js; used when a command carries no timeout_ms (older server).
+export const ACTION_DEFAULT_MS: Record<BrowserAction, number> = {
+  navigate: 30000,
+  read: 15000,
+  snapshot: 17000,
+  click: 17000,
+  fill: 17000,
+  press: 17000,
+  scroll: 11000,
+  screenshot: 20000,
+  upload: 120000,
+  wait: 20000,
+  run_steps: 290000,
+};
+export const TIMEOUT_MARGIN_MS = 3000;
+
+// The budget a tool gets: answer before the server stops waiting.
+export function budgetFor(action: BrowserAction, timeoutMs?: number | null): number {
+  const base = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : ACTION_DEFAULT_MS[action] || 15000;
+  return Math.max(1000, base - TIMEOUT_MARGIN_MS);
+}
+
+const orUndef = (v: any) => (v === null || v === '' ? undefined : v);
+
 // ACTION → { internal tool name, arg transform }. This is the ONLY place the
-// platform's bounded-seven vocabulary meets the fork's internal tool names.
+// platform's bounded vocabulary meets the fork's internal tool names.
 const ACTION_MAP: Record<
   BrowserAction,
   { tool: string; buildArgs: (a: Record<string, any>) => Record<string, any> }
@@ -52,23 +100,43 @@ const ACTION_MAP: Record<
   },
   read: {
     tool: TOOL_NAMES.BROWSER.WEB_FETCHER, // chrome_get_web_content
-    buildArgs: (a) => ({ textContent: true, selector: a.selector || undefined }),
+    buildArgs: (a) => ({
+      textContent: true,
+      selector: orUndef(a.selector),
+      frame: orUndef(a.frame),
+      maxChars: orUndef(a.max_chars),
+    }),
   },
   click: {
     tool: TOOL_NAMES.BROWSER.CLICK, // chrome_click_element
-    buildArgs: (a) => ({ selector: a.selector }),
+    buildArgs: (a) => ({
+      selector: orUndef(a.selector),
+      ref: orUndef(a.ref),
+      frame: orUndef(a.frame),
+      nth: orUndef(a.nth),
+      strict: typeof a.strict === 'boolean' ? a.strict : undefined,
+    }),
   },
   fill: {
     tool: TOOL_NAMES.BROWSER.FILL, // chrome_fill_or_select
-    buildArgs: (a) => ({ selector: a.selector, value: a.value }),
+    buildArgs: (a) => ({
+      selector: orUndef(a.selector),
+      ref: orUndef(a.ref),
+      frame: orUndef(a.frame),
+      nth: orUndef(a.nth),
+      strict: typeof a.strict === 'boolean' ? a.strict : undefined,
+      value: a.value,
+    }),
   },
   screenshot: {
     tool: TOOL_NAMES.BROWSER.SCREENSHOT, // chrome_screenshot
     buildArgs: (a) => ({
       name: 'browser_screenshot',
       storeBase64: true,
-      fullPage: false,
-      selector: a.selector || undefined,
+      fullPage: a.full_page === true,
+      selector: orUndef(a.selector),
+      ref: orUndef(a.ref),
+      frame: orUndef(a.frame),
       // Capture via CDP on the (possibly background) channel tab — never needs to
       // bring the tab to the foreground.
       background: true,
@@ -77,7 +145,9 @@ const ACTION_MAP: Record<
   scroll: {
     tool: TOOL_NAMES.BROWSER.SCROLL, // chrome_scroll
     buildArgs: (a) => ({
-      selector: a.selector || undefined,
+      selector: orUndef(a.selector),
+      ref: orUndef(a.ref),
+      frame: orUndef(a.frame),
       direction: a.direction || 'down',
       amount: a.amount,
     }),
@@ -87,10 +157,50 @@ const ACTION_MAP: Record<
     // Bytes arrive base64 IN the command (server-resolved) — the extension
     // never fetches storage URLs (they may point at an internal endpoint).
     buildArgs: (a) => ({
-      selector: a.selector,
+      selector: orUndef(a.selector),
+      ref: orUndef(a.ref),
+      frame: orUndef(a.frame),
       base64Data: a.base64,
       fileName: a.file_name || undefined,
       mimeType: a.mime_type || undefined,
+    }),
+  },
+  snapshot: {
+    tool: KAREENOS_TOOL_NAMES.SNAPSHOT,
+    buildArgs: (a) => ({
+      mode: a.mode === 'full' ? 'full' : 'interactive',
+      selector: orUndef(a.selector),
+      maxChars: orUndef(a.max_chars),
+      includeText: a.include_text === true,
+      frame: orUndef(a.frame),
+    }),
+  },
+  wait: {
+    tool: KAREENOS_TOOL_NAMES.WAIT,
+    buildArgs: (a) => ({
+      text: orUndef(a.text),
+      selector: orUndef(a.selector),
+      ref: orUndef(a.ref),
+      state: orUndef(a.state),
+      load: orUndef(a.load),
+      timeout_ms: orUndef(a.timeout_ms),
+      frame: orUndef(a.frame),
+    }),
+  },
+  press: {
+    tool: KAREENOS_TOOL_NAMES.PRESS,
+    buildArgs: (a) => ({
+      keys: a.keys,
+      ref: orUndef(a.ref),
+      selector: orUndef(a.selector),
+      frame: orUndef(a.frame),
+    }),
+  },
+  run_steps: {
+    tool: KAREENOS_TOOL_NAMES.RUN_STEPS,
+    buildArgs: (a) => ({
+      steps: Array.isArray(a.steps) ? a.steps : [],
+      stop_on_error: a.stop_on_error !== false,
     }),
   },
 };
@@ -104,11 +214,16 @@ export function resolveToolCall(command: CommandEnvelope): {
   args: Record<string, any>;
 } {
   const m = ACTION_MAP[command.action];
-  // laneId is injected AFTER buildArgs so the per-action transforms stay
-  // lane-agnostic; every tool resolves its target tab from this lane.
+  // laneId + timeoutMs are injected AFTER buildArgs so the per-action transforms
+  // stay lane/budget-agnostic; every tool resolves its target tab from this lane
+  // and keeps its waits inside the budget.
   return {
     name: m.tool,
-    args: { ...m.buildArgs(command.args || {}), laneId: command.lane_id || 'default' },
+    args: {
+      ...m.buildArgs(command.args || {}),
+      laneId: command.lane_id || 'default',
+      timeoutMs: budgetFor(command.action, command.timeout_ms),
+    },
   };
 }
 
@@ -136,6 +251,20 @@ export function toResultEnvelope(
   const text = firstText(result);
 
   if (result && result.isError) {
+    const structured = parseStructuredError(text);
+    if (structured) {
+      const details = structured.details || {};
+      const data: Record<string, any> = { error_details: details };
+      if (Array.isArray(details.candidates)) data.candidates = details.candidates;
+      if (details.settle) data.settle = details.settle;
+      return {
+        ...base,
+        status: 'failed',
+        message: `[${structured.code}] ${structured.message}`,
+        data,
+        errors: [{ code: structured.code, message: structured.message, severity: 'error', details }],
+      };
+    }
     return {
       ...base,
       status: 'failed',
@@ -151,24 +280,29 @@ export function toResultEnvelope(
     };
   }
 
-  // Screenshot: the tool returns content[].text = JSON {base64Data, mimeType}.
+  // Screenshot: the tool returns content[].text = JSON {base64Data, mimeType, …}.
   // Surface it as { base64, media_type } so the server persists it to S3 and
   // builds a file_block (server-side), instead of inlining base64 elsewhere.
   if (action === 'screenshot') {
     let base64 = '';
     let mediaType = 'image/jpeg';
+    let extra: Record<string, any> = {};
     try {
       const parsed = JSON.parse(text);
       base64 = parsed.base64Data || parsed.base64 || '';
       mediaType = parsed.mimeType || parsed.media_type || mediaType;
+      if (parsed.clip) extra.clip = parsed.clip;
+      if (parsed.clip_warning) extra.clip_warning = parsed.clip_warning;
+      if (parsed.target) extra.target = parsed.target;
+      if (parsed.frame) extra.frame = parsed.frame;
     } catch (e) {
       /* fall through to empty */
     }
     return {
       ...base,
       status: 'success',
-      message: 'Screenshot captured',
-      data: { base64, media_type: mediaType },
+      message: 'Screenshot captured' + (extra.clip_warning ? ' — ' + extra.clip_warning : ''),
+      data: { base64, media_type: mediaType, ...extra },
       errors: [],
     };
   }
@@ -185,19 +319,22 @@ export function toResultEnvelope(
   return { ...base, status: 'success', message: data.message || action + ' ok', data, errors: [] };
 }
 
-// Build a server-shaped failure envelope (unsupported action, internal error).
+// Build a server-shaped failure envelope (unsupported action, internal error, timeout).
 export function failureEnvelope(
   command: CommandEnvelope,
   code: string,
   message: string,
+  details?: Record<string, any>,
 ): ResultEnvelope {
+  const err: ResultError = { code, message, severity: 'error' };
+  if (details) err.details = details;
   return {
     command_id: command.command_id,
     correlation_id: command.correlation_id,
     lane_id: command.lane_id || null,
     status: 'failed',
-    message,
-    data: {},
-    errors: [{ code, message, severity: 'error' }],
+    message: `[${code}] ${message}`,
+    data: details ? { error_details: details } : {},
+    errors: [err],
   };
 }

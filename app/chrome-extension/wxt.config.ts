@@ -10,7 +10,17 @@ import IconsResolver from 'unplugin-icons/resolver';
 config({ path: resolve(process.cwd(), '.env') });
 config({ path: resolve(process.cwd(), '.env.local') });
 
-const CHROME_EXTENSION_KEY = process.env.CHROME_EXTENSION_KEY;
+// Stable extension ID (2026-09-14). Without a manifest `key`, an UNPACKED
+// extension's ID is derived from its folder PATH — so every re-extract of the
+// release zip into a new folder produced a NEW extension with EMPTY storage,
+// i.e. "signed out" after each update. This public key pins the ID
+// (jilgmlejdnbgbjpjnoamjgbadnmlfadh) for every build. It is not a secret: the
+// private half is only ever needed for Web Store packaging and lives outside the
+// repo (keys/kareenos-extension.pem, gitignored). A white-label build may set
+// CHROME_EXTENSION_KEY to its own public key.
+const KAREENOS_EXTENSION_PUBLIC_KEY =
+  'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuGRTyPReTYcnTlwy9ZSjVBiFSSpBluX4ThC14xZcN6Px3u9yWap6UXPrRKT6abuHVJi3iBl1rxz3dKJokk+x+qf25RJtIKby3SJEVCafwzmXZPKDv5YsONRJiOopPLHiKfUWmg0ZoozIzwtXvwzg1K/pRkS9RhY3EiHgMqr91WluddnF+hqP+3+yYbDQQfg8JqB+jltFYRFe3tuLrMaqbKGGZXthO6CKGYRK0jUbLT3whNMWZaomqYFQft02wj94TnozG+c9amJ40LkFCsfmsyOxJU9ziXTUIlJGmrMr6wvmwa/vGt9Gfb1vHRDRROujrASiK1jJLSekF/yF8nBMYwIDAQAB';
+const CHROME_EXTENSION_KEY = process.env.CHROME_EXTENSION_KEY || KAREENOS_EXTENSION_PUBLIC_KEY;
 // Detect dev mode early for manifest-level switches
 const IS_DEV = process.env.NODE_ENV !== 'production' && process.env.MODE !== 'production';
 
@@ -43,7 +53,7 @@ export default defineConfig({
     // ],
   },
   manifest: {
-    // Use environment variable for the key, fallback to undefined if not set
+    // Pins the extension ID across installs/updates (see KAREENOS_EXTENSION_PUBLIC_KEY).
     key: CHROME_EXTENSION_KEY,
     default_locale: 'en',
     // Kareenos branding — literal (locale-independent) name/description.

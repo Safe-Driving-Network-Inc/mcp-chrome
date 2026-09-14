@@ -1,6 +1,7 @@
 import { ToolExecutor } from '@/common/tool-handler';
 import type { ToolResult } from '@/common/tool-handler';
 import { TIMEOUTS, ERROR_MESSAGES } from '@/common/constants';
+import { errorFromResponse } from '@/common/browser-errors';
 
 const PING_TIMEOUT_MS = 300;
 
@@ -373,6 +374,10 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
           : await chrome.tabs.sendMessage(tabId, message);
 
       if (response && response.error) {
+        // v2 helpers answer { error: { code, message, details } } — keep it
+        // structured so the tool can report the code; legacy prose stays an Error.
+        const structured = errorFromResponse(response);
+        if (structured) throw structured;
         throw new Error(String(response.error));
       }
 

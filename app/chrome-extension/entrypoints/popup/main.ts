@@ -34,6 +34,7 @@ interface StateInfo {
   bound_since?: number | null;
   last_error?: string | null;
   superseded_by?: any;
+  version?: string | null;
 }
 
 const app = document.getElementById('app')!;
@@ -59,6 +60,7 @@ app.innerHTML = `
       <p class="kc-note" id="kc-learn-note"></p>
     </div>
     <p class="kc-note" id="kc-note"></p>
+    <p class="kc-foot" id="kc-foot"></p>
   </div>`;
 
 const $ = (id: string) => document.getElementById(id)!;
@@ -97,6 +99,7 @@ function renderInfo(info: StateInfo) {
   if (state === 'bound') {
     note = 'Agents can act in this browser. Stays connected across restarts';
     if (info.renewable === false && info.exp) note += ' — sign in again before ' + fmtDate(info.exp);
+    else if (info.exp) note += '; the sign-in renews itself (valid until ' + fmtDate(info.exp) + ')';
     note += '.';
   } else if (state === 'disconnected' || state === 'connecting') {
     note = 'Signed in — reconnecting automatically.' + (info.last_error ? ' (' + info.last_error + ')' : '');
@@ -111,6 +114,22 @@ function renderInfo(info: StateInfo) {
       : 'Sign in to connect this browser to a Kareenos project.';
   }
   $('kc-note').textContent = note;
+  // Support footer: version + token expiry + last error — what a "why am I
+  // signed out?" report needs and what nobody can see otherwise.
+  let version = info.version || '';
+  if (!version) {
+    try {
+      version = chrome.runtime.getManifest().version;
+    } catch (e) {
+      version = '';
+    }
+  }
+  const bits: string[] = [];
+  if (version) bits.push('v' + version);
+  if (hasToken && info.exp) bits.push('token until ' + fmtDate(info.exp));
+  if (info.last_error && state !== 'bound') bits.push(info.last_error);
+  $('kc-foot').textContent = bits.join(' · ');
+  $('kc-foot').title = info.last_error || '';
 }
 
 function shorten(s: string): string {
@@ -163,7 +182,13 @@ $('kc-disconnect').addEventListener('click', async () => {
   const res: any = await chrome.runtime
     .sendMessage({ type: 'browser_channel_sign_out' })
     .catch(() => null);
-  renderInfo({ state: 'signed_out', has_token: false, last_error: res && res.ok ? null : 'sign-out request failed' });
+  if (res && res.ok) {
+    renderInfo({ state: 'signed_out', has_token: false, last_error: null, version: lastInfo.version });
+  } else {
+    // The background did not confirm — do not pretend we are signed out.
+    $('kc-note').textContent = 'Sign-out request did not go through — try again.';
+    refreshInfo();
+  }
 });
 
 // Take the channel back from another browser bound to the same project.
@@ -240,13 +265,31 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
 });
 
-async function refreshInfo(): Promise<StateInfo> {
+async function queryState(): Promise<StateInfo | null> {
   const res: any = await chrome.runtime
     .sendMessage({ type: 'browser_channel_get_state' })
     .catch(() => null);
-  const info: StateInfo = res && res.state ? res : { state: 'signed_out', has_token: false };
-  renderInfo(info);
-  return info;
+  return res && res.state ? (res as StateInfo) : null;
+}
+
+// A missed message is NOT "signed out": the service worker may simply be waking
+// up. Retry briefly and say so; only the background's own answer paints a state.
+async function refreshInfo(): Promise<StateInfo> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const info = await queryState();
+    if (info) {
+      renderInfo(info);
+      return info;
+    }
+    $('kc-status').textContent = 'Waking up…';
+    $('kc-dot').className = 'kc-dot kc-connecting';
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  $('kc-status').textContent = 'Not responding';
+  $('kc-dot').className = 'kc-dot kc-disconnected';
+  $('kc-note').textContent =
+    'The extension did not answer. Open chrome://extensions and press Reload on the Kareenos card.';
+  return lastInfo;
 }
 
 // Initial paint — and if we hold a token but are not bound, nudge the background

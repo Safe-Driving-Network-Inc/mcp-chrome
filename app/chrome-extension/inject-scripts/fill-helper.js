@@ -52,21 +52,29 @@ if (window.__FILL_HELPER_INITIALIZED__) {
    * @param {string} value - Value to fill into the element
    * @returns {Promise<Object>} - Result of the fill operation
    */
-  async function fillElement(selector, value, ref = null) {
+  async function fillElement(selector, value, ref = null, expectEpoch = null) {
     try {
       // Find the element
       let element = null;
       if (ref && typeof ref === 'string') {
-        try {
-          const map = window.__claudeElementMap;
-          const weak = map && map[ref];
-          element = weak && typeof weak.deref === 'function' ? weak.deref() : null;
-        } catch (e) {
-          // ignore
+        // Resolve through k-dom-core when present (epoch-checked: STALE_REF /
+        // DETACHED come back as structured errors); the legacy map otherwise.
+        if (typeof window.__kResolveRef === 'function') {
+          const res = window.__kResolveRef(ref, expectEpoch);
+          if (res && res.error) return res;
+          element = res && res.el;
+        } else {
+          try {
+            const map = window.__claudeElementMap;
+            const weak = map && map[ref];
+            element = weak && typeof weak.deref === 'function' ? weak.deref() : null;
+          } catch (e) {
+            // ignore
+          }
         }
         if (!element || !(element instanceof Element)) {
           return {
-            error: `Element ref "${ref}" not found. Please call chrome_read_page first and ensure the ref is still valid.`,
+            error: { code: 'STALE_REF', message: `Element ref "${ref}" is not known in this frame — take a new browser_snapshot.`, details: { ref } },
           };
         }
       } else if (selector) {
@@ -112,11 +120,23 @@ if (window.__FILL_HELPER_INITIALIZED__) {
       }
       if (!element) {
         return {
-          error: selector
-            ? `Element with selector "${selector}" not found`
-            : `No selector given and no focused/visible editable field was found`,
+          error: {
+            code: 'NOT_FOUND',
+            message: selector
+              ? `Element with selector "${selector}" not found in this frame`
+              : `No selector given and no focused/visible editable field was found`,
+            details: { selector: selector || null },
+          },
         };
       }
+
+      // Bring it on screen BEFORE judging visibility — a snapshot ref may point
+      // below the fold, and "not visible" for an off-screen field was a false
+      // negative (the fill used to scroll into view only after the check).
+      try {
+        element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+      } catch (_) {}
+      await new Promise((resolve) => setTimeout(resolve, 80));
 
       // Get element information
       const rect = element.getBoundingClientRect();
@@ -141,7 +161,13 @@ if (window.__FILL_HELPER_INITIALIZED__) {
       // Check if element is visible
       if (!elementInfo.isVisible) {
         return {
-          error: `Element with selector "${selector}" is not visible`,
+          error: { code: 'NOT_VISIBLE', message: `Element ${ref || '"' + selector + '"'} is not visible (hidden, zero-size or covered)`, details: { selector: selector || null, ref: ref || null } },
+          elementInfo,
+        };
+      }
+      if (element.disabled || element.getAttribute('aria-disabled') === 'true') {
+        return {
+          error: { code: 'DISABLED', message: `Element ${ref || '"' + selector + '"'} is disabled — the page must enable it first`, details: { selector: selector || null, ref: ref || null } },
           elementInfo,
         };
       }
@@ -200,19 +226,19 @@ if (window.__FILL_HELPER_INITIALIZED__) {
             }
             if (!validTags.includes(element.tagName)) {
               return {
-                error: `Element with selector "${selector}" is not a fillable element (must be INPUT, TEXTAREA, or SELECT)`,
+                error: { code: 'NOT_FILLABLE', message: `Element ${ref || '"' + selector + '"'} is not a fillable element (must be an input, textarea, select or a rich-text editor)` },
                 elementInfo,
               };
             }
           } else {
             return {
-              error: `Element with selector "${selector}" is not a fillable element (must be INPUT, TEXTAREA, or SELECT)`,
+              error: { code: 'NOT_FILLABLE', message: `Element ${ref || '"' + selector + '"'} is not a fillable element (must be an input, textarea, select or a rich-text editor)` },
               elementInfo,
             };
           }
         } catch (_) {
           return {
-            error: `Element with selector "${selector}" is not a fillable element (must be INPUT, TEXTAREA, or SELECT)`,
+            error: { code: 'NOT_FILLABLE', message: `Element ${ref || '"' + selector + '"'} is not a fillable element (must be an input, textarea, select or a rich-text editor)` },
             elementInfo,
           };
         }
@@ -225,7 +251,7 @@ if (window.__FILL_HELPER_INITIALIZED__) {
         element.type !== null
       ) {
         return {
-          error: `Input element with selector "${selector}" has type "${element.type}" which is not fillable`,
+          error: { code: 'NOT_FILLABLE', message: `Input ${ref || '"' + selector + '"'} has type "${element.type}" which is not fillable` },
           elementInfo,
         };
       }
@@ -432,7 +458,7 @@ if (window.__FILL_HELPER_INITIALIZED__) {
       };
     } catch (error) {
       return {
-        error: `Error filling element: ${error.message}`,
+        error: { code: 'EXECUTION_ERROR', message: `Error filling element: ${error.message}` },
       };
     }
   }
@@ -472,13 +498,20 @@ if (window.__FILL_HELPER_INITIALIZED__) {
     const elementAtPoint = document.elementFromPoint(centerX, centerY);
     if (!elementAtPoint) return false;
 
-    return element === elementAtPoint || element.contains(elementAtPoint);
+    // Accept the target, a descendant, or an ANCESTOR at the point (a label span
+    // with pointer-events:none hands the hit to the owning control — the norm on
+    // hashed-class sites; click-helper accepts the same).
+    return (
+      element === elementAtPoint ||
+      element.contains(elementAtPoint) ||
+      elementAtPoint.contains(element)
+    );
   }
 
   // Listen for messages from the extension
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     if (request.action === 'fillElement') {
-      fillElement(request.selector, request.value, request.ref)
+      fillElement(request.selector, request.value, request.ref, request.expect_epoch)
         .then(sendResponse)
         .catch((error) => {
           sendResponse({

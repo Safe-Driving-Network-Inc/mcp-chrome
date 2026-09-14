@@ -10,6 +10,10 @@ import {
   compressImage,
 } from '../../../../utils/image-utils';
 import { screenshotContextManager } from '@/utils/screenshot-context';
+import { isBrowserActionError, structuredErrorFromException, BrowserActionError } from '@/common/browser-errors';
+import { K_MSG } from '@/common/kareenos-tool-names';
+import { coreCall } from './core-bridge';
+import { resolveTarget } from './target-resolver';
 
 // Screenshot-specific constants
 const SCREENSHOT_CONSTANTS = {
@@ -56,6 +60,9 @@ interface ScreenshotToolParams {
   savePng?: boolean;
   maxHeight?: number; // Maximum height to capture in pixels (for infinite scroll pages)
   laneId?: string; // which lane's tab to capture
+  ref?: string; // f<frame>e<n> from browser_snapshot — clip to that element (any frame)
+  frame?: string | number | null; // restrict a selector clip to one frame
+  timeoutMs?: number;
 }
 
 /** Page details returned by screenshot-helper content script */
@@ -145,6 +152,11 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
     let originalScroll: { x: number; y: number } | null = null;
     let didPreparePage = false;
     let pageDetails: ScreenshotPageDetails | undefined;
+    // What the image shows, for the agent: 'viewport' | 'element' | 'full_page'.
+    let clipKind: 'viewport' | 'element' | 'full_page' = 'viewport';
+    let clipWarning = '';
+    let clipTarget: any = null;
+    let clipFrame: any = null;
 
     try {
       const background = args.background === true;
@@ -174,39 +186,33 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
             let widthCss: number;
             let heightCss: number;
 
-            if (selector) {
-              // Resolve the element's page-relative rect (scrolling it into view).
-              // executeScript targets the tab by id — runs on a background tab too.
-              const injected = await chrome.scripting.executeScript({
-                target: { tabId },
-                func: (sel: string) => {
-                  const el = document.querySelector(sel) as HTMLElement | null;
-                  if (!el) return null;
-                  el.scrollIntoView({ block: 'center', inline: 'center' });
-                  const r = el.getBoundingClientRect();
-                  return {
-                    x: r.left + window.scrollX,
-                    y: r.top + window.scrollY,
-                    width: r.width,
-                    height: r.height,
-                  };
-                },
-                args: [selector],
-              });
-              const rect = injected && injected[0] && (injected[0] as any).result;
+            if (selector || args.ref) {
+              // Element clip in ANY frame: resolve the target (ref or selector,
+              // deep-shadow, text=) and translate its rect to top-document page
+              // coordinates through same-origin frame elements. A cross-origin
+              // ancestor blocks the walk → viewport capture with a warning.
+              const laneId = args.laneId || 'default';
+              const target = await resolveTarget(tabId, laneId, { ref: args.ref, selector, frame: args.frame, kind: 'any' });
+              const rect: any = await coreCall(tabId, target.frameId, { action: K_MSG.ELEMENT_RECT, ref: target.helperRef, expect_epoch: target.expectEpoch });
               if (!rect || !rect.width || !rect.height) {
-                throw new Error(`Element not found / not visible for selector: ${selector}`);
+                throw new BrowserActionError('NOT_VISIBLE', `The element ${target.ref} has no visible box to capture.`, { ref: target.ref });
               }
-              shotParams.clip = {
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: rect.height,
-                scale: 1,
-              };
-              widthCss = Math.round(rect.width);
-              heightCss = Math.round(rect.height);
+              clipTarget = { ref: target.ref, role: target.role, name: target.name };
+              clipFrame = { id: target.frameId, url: target.frameUrl || undefined };
+              if (rect.chain_complete && typeof rect.page_x === 'number') {
+                shotParams.clip = { x: rect.page_x, y: rect.page_y, width: rect.width, height: rect.height, scale: 1 };
+                widthCss = Math.round(rect.width);
+                heightCss = Math.round(rect.height);
+                clipKind = 'element';
+              } else {
+                shotParams.captureBeyondViewport = false;
+                widthCss = Math.round(viewport.clientWidth || 800);
+                heightCss = Math.round(viewport.clientHeight || 600);
+                clipKind = 'viewport';
+                clipWarning = `element ${target.ref} sits inside a cross-origin frame; captured the viewport (element scrolled into view) instead of an exact clip`;
+              }
             } else if (fullPage) {
+              clipKind = 'full_page';
               const w = Math.ceil((content && content.width) || viewport.clientWidth || 800);
               const h = Math.ceil((content && content.height) || viewport.clientHeight || 600);
               shotParams.clip = { x: 0, y: 0, width: w, height: h, scale: 1 };
@@ -233,6 +239,7 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
             finalImageHeightCss = heightCss;
           });
         } catch (e) {
+          if (isBrowserActionError(e)) throw e; // a targeting failure is an answer, not a fallback
           console.warn('CDP capture failed, falling back to helper path:', e);
         }
       }
@@ -348,7 +355,14 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({ base64Data, mimeType: compressed.mimeType }),
+              text: JSON.stringify({
+                base64Data,
+                mimeType: compressed.mimeType,
+                clip: clipKind,
+                clip_warning: clipWarning || undefined,
+                target: clipTarget || undefined,
+                frame: clipFrame || undefined,
+              }),
             },
           ],
           isError: false,
@@ -395,6 +409,7 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
       }
     } catch (error) {
       console.error('Error during screenshot execution:', error);
+      if (isBrowserActionError(error)) return structuredErrorFromException(error);
       return createErrorResponse(
         `Screenshot error: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
       );

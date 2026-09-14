@@ -1,80 +1,89 @@
-import { createErrorResponse, ToolResult } from '@/common/tool-handler';
+// Kareenos Browser Channel v2 — scroll (read-class).
+//
+// Scrolls the page, a container (by ref / selector / text=), or the nearest
+// scrollable ancestor of a target, in ANY frame and through open shadow roots —
+// the old version ran document.querySelector in the top frame only and silently
+// scrolled the page when the selector missed. A missed target is now NOT_FOUND.
+// `direction: into_view` scrolls a target into view. A mini settle reports
+// dom_mutations so the agent can tell a virtualized list rendered new rows.
+import type { ToolResult } from '@/common/tool-handler';
 import { BaseBrowserToolExecutor } from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
-
-// Kareenos Browser Channel — scroll tool (read-class). Lets an agent advance a
-// page or a scrollable container (e.g. a virtualized list like LinkedIn's
-// messaging sidebar) so off-screen items render into the DOM and become
-// readable / clickable. Not side-effecting → never hits the approval gate.
+import { createStructuredError, structuredErrorFromException } from '@/common/browser-errors';
+import { K_MSG } from '@/common/kareenos-tool-names';
+import { formatRef } from '@/common/browser-refs';
+import { listFrames, coreCall } from './core-bridge';
+import { resolveTarget, frameMatches } from './target-resolver';
 
 interface ScrollToolParams {
-  selector?: string; // optional CSS selector of the scroll container; omitted = the page
-  direction?: 'down' | 'up' | 'top' | 'bottom'; // default 'down'
-  amount?: number; // pixels for up/down; default ~85% of the container's viewport
+  selector?: string;
+  ref?: string;
+  frame?: string | number | null;
+  direction?: 'down' | 'up' | 'top' | 'bottom' | 'into_view';
+  amount?: number;
   tabId?: number;
   windowId?: number;
-  laneId?: string; // which lane's tab to scroll
+  laneId?: string;
+  timeoutMs?: number;
 }
 
 class ScrollTool extends BaseBrowserToolExecutor {
   name = TOOL_NAMES.BROWSER.SCROLL;
 
   async execute(args: ScrollToolParams): Promise<ToolResult> {
-    const { selector, direction = 'down', amount } = args;
+    const direction = (['down', 'up', 'top', 'bottom', 'into_view'] as const).includes(args.direction as any) ? args.direction! : 'down';
+    const laneId = args.laneId || 'default';
+    if (direction === 'into_view' && !args.ref && !args.selector) {
+      return createStructuredError('NOT_FOUND', 'direction "into_view" needs a ref or selector');
+    }
     try {
-      // Target the single channel tab the agent drives (same tab navigate steers).
       const tab = await this.resolveTargetTab(args);
-      if (!tab.id) {
-        return createErrorResponse('Active tab has no ID');
+      if (!tab.id) return createStructuredError('NO_FRAME_ACCESS', 'The channel tab has no id');
+      const tabId = tab.id;
+
+      let frameId = 0;
+      let frameUrl = '';
+      const msg: Record<string, any> = { action: K_MSG.SCROLL, direction, amount: typeof args.amount === 'number' ? args.amount : undefined };
+      let targetRef: string | undefined;
+      if (args.ref || args.selector) {
+        const t = await resolveTarget(tabId, laneId, { ref: args.ref, selector: args.selector, frame: args.frame, kind: 'any' });
+        frameId = t.frameId;
+        frameUrl = t.frameUrl;
+        msg.ref = t.helperRef;
+        msg.expect_epoch = t.expectEpoch;
+        targetRef = t.ref;
+      } else {
+        const frames = await listFrames(tabId);
+        const f = frames.find((x) => frameMatches(x, args.frame)) || frames[0];
+        frameId = f.frameId;
+        frameUrl = f.url;
       }
 
-      const [{ result } = { result: null }] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        // Runs in the page. Returns the post-scroll position so the agent can tell
-        // whether more content is available (atBottom) and loop if needed.
-        func: (sel: string | null, dir: string, amt: number | null) => {
-          let el: any = null;
-          if (sel) el = document.querySelector(sel);
-          // Fall back to the document's scrolling element when no selector (or it
-          // isn't itself scrollable).
-          const scroller =
-            el && el.scrollHeight > el.clientHeight
-              ? el
-              : document.scrollingElement || document.documentElement || document.body;
-          if (!scroller) return { error: 'No scrollable element found' };
-          const step =
-            typeof amt === 'number' && amt > 0 ? amt : Math.floor(scroller.clientHeight * 0.85);
-          const before = scroller.scrollTop;
-          if (dir === 'top') scroller.scrollTop = 0;
-          else if (dir === 'bottom') scroller.scrollTop = scroller.scrollHeight;
-          else if (dir === 'up') scroller.scrollTop = Math.max(0, before - step);
-          else scroller.scrollTop = before + step; // 'down'
-          const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
-          const atTop = scroller.scrollTop <= 0;
-          return {
-            scrolled: scroller.scrollTop !== before,
-            scrollTop: scroller.scrollTop,
-            scrollHeight: scroller.scrollHeight,
-            clientHeight: scroller.clientHeight,
-            atBottom,
-            atTop,
-            usedSelector: sel || null,
-          };
-        },
-        args: [selector || null, direction, typeof amount === 'number' ? amount : null],
-      });
-
-      if (result && (result as any).error) {
-        return createErrorResponse((result as any).error);
+      const r = await coreCall(tabId, frameId, msg);
+      let mini: any = null;
+      try {
+        mini = await coreCall(tabId, frameId, { action: K_MSG.QUIET_WAIT, quiet_ms: 150, cap_ms: 1000 });
+      } catch (e) {
+        mini = null;
       }
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result || { scrolled: false }) }],
-        isError: false,
+      const out: Record<string, any> = {
+        success: true,
+        message: r.scrolled ? `Scrolled ${direction}` : `Nothing to scroll (${direction}) — already at the ${direction === 'up' || direction === 'top' ? 'top' : 'end'}`,
+        scrolled: !!r.scrolled,
+        direction,
+        scrollTop: r.scrollTop,
+        scrollHeight: r.scrollHeight,
+        clientHeight: r.clientHeight,
+        atTop: r.atTop,
+        atBottom: r.atBottom,
+        container: r.container,
+        frame: { id: frameId, url: frameUrl || undefined },
+        target: r.target ? { ref: targetRef || formatRef(frameId, r.target.ref), role: r.target.role, name: r.target.name, in_viewport: r.in_viewport } : undefined,
+        settle: mini ? { dom_mutations: mini.mutations, quiet_ms: mini.waited_ms, capped: !!mini.capped } : undefined,
       };
-    } catch (error) {
-      return createErrorResponse(
-        `Error scrolling: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      return { content: [{ type: 'text', text: JSON.stringify(out) }], isError: false };
+    } catch (e) {
+      return structuredErrorFromException(e);
     }
   }
 }

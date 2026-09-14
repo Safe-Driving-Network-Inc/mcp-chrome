@@ -1,30 +1,45 @@
-import { createErrorResponse, ToolResult } from '@/common/tool-handler';
+// Kareenos Browser Channel v2 — click + fill.
+//
+// Both go through the shared target resolver (ref | selector, frame, nth,
+// strict) so the frame is KNOWN before anything is dispatched — no more
+// "try every frame, first answer wins", which let a top-frame false positive
+// beat the real control in a child frame (LinkedIn's composer, the search-bar
+// incident). Both settle afterwards and report what the page did.
+import type { ToolResult } from '@/common/tool-handler';
 import { BaseBrowserToolExecutor } from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 import { TOOL_MESSAGE_TYPES } from '@/common/message-types';
-import { TIMEOUTS, ERROR_MESSAGES } from '@/common/constants';
+import { createStructuredError, structuredErrorFromException, BrowserActionError } from '@/common/browser-errors';
+import { K_MSG } from '@/common/kareenos-tool-names';
+import { formatRef } from '@/common/browser-refs';
+import { listFrames, coreCall, ensureCore, noteFrameEpoch, expectedEpoch } from './core-bridge';
+import { resolveTarget, frameMatches, describeCandidate, type ResolvedTarget, type Candidate } from './target-resolver';
+import { withSettle } from '../settle';
 
-interface Coordinates {
-  x: number;
-  y: number;
+interface TargetArgs {
+  selector?: string;
+  ref?: string;
+  frame?: string | number | null;
+  nth?: number | null;
+  strict?: boolean | null;
+  tabId?: number;
+  windowId?: number;
+  laneId?: string;
+  timeoutMs?: number;
 }
 
-interface ClickToolParams {
-  selector?: string; // CSS selector or XPath for the element to click
-  selectorType?: 'css' | 'xpath'; // Type of selector (default: 'css')
-  ref?: string; // Element ref from accessibility tree (window.__claudeElementMap)
-  coordinates?: Coordinates; // Coordinates to click at (x, y relative to viewport)
-  waitForNavigation?: boolean; // Whether to wait for navigation to complete after click
-  timeout?: number; // Timeout in milliseconds for waiting for the element or navigation
-  frameId?: number; // Target frame for ref/selector resolution
-  double?: boolean; // Perform double click when true
+interface ClickToolParams extends TargetArgs {
+  double?: boolean;
   button?: 'left' | 'right' | 'middle';
-  bubbles?: boolean;
-  cancelable?: boolean;
   modifiers?: { altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean };
-  tabId?: number; // target existing tab id
-  windowId?: number; // when no tabId, pick active tab from this window
-  laneId?: string; // which lane's tab to click in
+}
+
+function frameInfo(target: ResolvedTarget) {
+  return { id: target.frameId, url: target.frameUrl || undefined };
+}
+
+function altList(target: ResolvedTarget) {
+  return target.alternatives.length ? target.alternatives.map((c: Candidate) => describeCandidate(c)) : undefined;
 }
 
 /**
@@ -33,127 +48,46 @@ interface ClickToolParams {
 class ClickTool extends BaseBrowserToolExecutor {
   name = TOOL_NAMES.BROWSER.CLICK;
 
-  /**
-   * Execute click operation
-   */
   async execute(args: ClickToolParams): Promise<ToolResult> {
-    const {
-      selector,
-      selectorType = 'css',
-      coordinates,
-      waitForNavigation = false,
-      timeout = TIMEOUTS.DEFAULT_WAIT * 5,
-      frameId,
-      button,
-      bubbles,
-      cancelable,
-      modifiers,
-    } = args;
-
-    console.log(`Starting click operation with options:`, args);
-
-    if (!selector && !coordinates && !args.ref) {
-      return createErrorResponse(
-        ERROR_MESSAGES.INVALID_PARAMETERS + ': Provide ref or selector or coordinates',
-      );
+    if (!args.selector && !args.ref) {
+      return createStructuredError('NOT_FOUND', 'Provide ref (from browser_snapshot, e.g. f0e12) or selector (text=Label / CSS).');
     }
-
+    const laneId = args.laneId || 'default';
+    const budget = args.timeoutMs && args.timeoutMs > 0 ? args.timeoutMs : 14000;
+    const started = Date.now();
     try {
-      // Resolve tab
-      // Target the single channel tab the agent drives (same tab navigate steers).
       const tab = await this.resolveTargetTab(args);
-      if (!tab.id) {
-        return createErrorResponse(ERROR_MESSAGES.TAB_NOT_FOUND + ': Active tab has no ID');
-      }
+      if (!tab.id) return createStructuredError('NO_FRAME_ACCESS', 'The channel tab has no id');
+      const tabId = tab.id;
 
-      let finalRef = args.ref;
-      let finalSelector = selector;
+      const target = await resolveTarget(tabId, laneId, {
+        ref: args.ref,
+        selector: args.selector,
+        frame: args.frame,
+        nth: args.nth,
+        strict: args.strict,
+        kind: 'click',
+      });
+      console.log(`[BC] click resolve ${args.ref || args.selector} → ${target.ref} (${target.role} "${target.name}", frame f${target.frameId}, tier ${target.tier}, alternatives ${target.alternatives.length})`);
 
-      // If selector is XPath, convert to ref first
-      if (selector && selectorType === 'xpath') {
-        await this.injectContentScript(tab.id, ['inject-scripts/accessibility-tree-helper.js']);
-        try {
-          const resolved = await this.sendMessageToTab(
-            tab.id,
-            {
-              action: TOOL_MESSAGE_TYPES.ENSURE_REF_FOR_SELECTOR,
-              selector,
-              isXPath: true,
-            },
-            frameId,
-          );
-          if (resolved && resolved.success && resolved.ref) {
-            finalRef = resolved.ref;
-            finalSelector = undefined; // Use ref instead of selector
-          } else {
-            return createErrorResponse(
-              `Failed to resolve XPath selector: ${resolved?.error || 'unknown error'}`,
-            );
-          }
-        } catch (error) {
-          return createErrorResponse(
-            `Error resolving XPath: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }
+      await ensureCore(tabId, target.frameId); // click-helper resolves refs through the core
+      await this.injectContentScript(tabId, ['inject-scripts/click-helper.js'], false, 'ISOLATED', false, [target.frameId]);
 
-      // Search every frame — dialogs/editors (and their buttons) commonly live
-      // in a same-origin child frame that a top-frame-only click never sees.
-      const frameIds = await this.listFrameIds(tab.id, frameId);
-      let result: any = null;
-      let lastError = '';
-      for (const fid of frameIds) {
-        try {
-          await this.injectContentScript(
-            tab.id,
-            ['inject-scripts/click-helper.js'],
-            false,
-            'ISOLATED',
-            false,
-            fid === undefined ? undefined : [fid],
-          );
-          const r = await this.sendMessageToTab(
-            tab.id,
-            {
-              action: TOOL_MESSAGE_TYPES.CLICK_ELEMENT,
-              selector: finalSelector,
-              coordinates,
-              ref: finalRef,
-              waitForNavigation,
-              timeout,
-              double: args.double === true,
-              button,
-              bubbles,
-              cancelable,
-              modifiers,
-            },
-            fid,
-          );
-          if (r && !r.error) {
-            result = r;
-            break;
-          }
-          lastError = (r && r.error) || lastError;
-        } catch (e) {
-          lastError = e instanceof Error ? e.message : String(e);
-        }
-      }
-
-      if (!result) {
-        return createErrorResponse(lastError || 'No frame on this page contained that element');
-      }
-
-      // Determine actual click method used
-      let clickMethod: string;
-      if (coordinates) {
-        clickMethod = 'coordinates';
-      } else if (finalRef) {
-        clickMethod = 'ref';
-      } else if (finalSelector) {
-        clickMethod = 'selector';
-      } else {
-        clickMethod = 'unknown';
-      }
+      const { result, settle } = await withSettle({ tabId, laneId, budgetMs: budget - 300 }, async () => {
+        return this.sendMessageToTab(
+          tabId,
+          {
+            action: TOOL_MESSAGE_TYPES.CLICK_ELEMENT,
+            ref: target.helperRef,
+            expect_epoch: target.expectEpoch,
+            double: args.double === true,
+            button: args.button,
+            modifiers: args.modifiers,
+          },
+          target.frameId,
+        );
+      });
+      console.log(`[BC] settle click ${target.ref} navigated=${settle.navigated ? 1 : 0} dialog_opened=${settle.dialog_opened ? 1 : 0} focus=${settle.focus ? settle.focus.ref : '-'} mutations=${settle.dom_mutations} quiet_ms=${settle.quiet_ms}`);
 
       return {
         content: [
@@ -161,36 +95,87 @@ class ClickTool extends BaseBrowserToolExecutor {
             type: 'text',
             text: JSON.stringify({
               success: true,
-              message: result.message || 'Click operation successful',
-              elementInfo: result.elementInfo,
-              navigationOccurred: result.navigationOccurred,
-              clickMethod,
+              message: (result && result.message) || 'Click operation successful',
+              ref: target.ref,
+              frame: frameInfo(target),
+              target: { role: target.role, name: target.name, tier: target.tier },
+              elementInfo: result && result.elementInfo,
+              covered_by_overlay: !!(result && result.elementInfo && result.elementInfo.coveredByOverlay),
+              alternatives: altList(target),
+              navigationOccurred: settle.navigated,
+              settle,
+              took_ms: Date.now() - started,
             }),
           },
         ],
         isError: false,
       };
-    } catch (error) {
-      console.error('Error in click operation:', error);
-      return createErrorResponse(
-        `Error performing click: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    } catch (e) {
+      return structuredErrorFromException(e);
     }
   }
 }
 
 export const clickTool = new ClickTool();
 
-interface FillToolParams {
-  selector?: string;
-  selectorType?: 'css' | 'xpath'; // Type of selector (default: 'css')
-  ref?: string; // Element ref from accessibility tree
+interface FillToolParams extends TargetArgs {
   // Accept string | number | boolean for broader form input coverage
   value: string | number | boolean;
-  frameId?: number;
-  tabId?: number; // target existing tab id
-  windowId?: number; // when no tabId, pick active tab from this window
-  laneId?: string; // which lane's tab to fill in
+}
+
+// No selector, no ref: the field that OWNS FOCUS, wherever it is. Ask every
+// frame (document.hasFocus() is false in a background tab, so the
+// activeElement chain is what counts): the deepest frame whose active element
+// is editable and not an <iframe> wins. Failing that, the ONLY visible editable
+// on the page. Several → AMBIGUOUS with refs — never "the top frame's first
+// box", which is how a caption once landed in LinkedIn's global search bar.
+async function resolveFocusedEditable(tabId: number, laneId: string, frame?: string | number | null): Promise<ResolvedTarget> {
+  const frames = (await listFrames(tabId)).filter((f) => frameMatches(f, frame));
+  if (!frames.length) throw new BrowserActionError('NO_FRAME_ACCESS', `No frame matches "${frame}" on this page.`);
+  const probes = await Promise.allSettled(
+    frames.map(async (f) => {
+      const r = await coreCall(tabId, f.frameId, { action: K_MSG.FOCUS_PROBE });
+      if (r && r.epoch) void noteFrameEpoch(laneId, tabId, f.frameId, r.epoch, f.url);
+      return { frame: f, r };
+    }),
+  );
+  let focused: { frame: any; el: any } | null = null;
+  const editables: Candidate[] = [];
+  probes.forEach((p) => {
+    if (p.status !== 'fulfilled') return;
+    const { frame: f, r } = p.value;
+    if (r && r.active && r.active.editable && !r.active.is_iframe) {
+      if (!focused || f.frameId > focused.frame.frameId) focused = { frame: f, el: r.active };
+    }
+    (r && r.editables ? r.editables : []).forEach((e: any) => {
+      editables.push({ ref: formatRef(f.frameId, e.ref), frame: f.frameId, frame_url: f.url, role: e.role, name: e.name, tier: 'visible', in_viewport: !!e.in_viewport, area: 0, editable: true });
+    });
+  });
+  const mk = async (f: any, el: any, tier: string): Promise<ResolvedTarget> => ({
+    frameId: f.frameId,
+    frameUrl: f.url,
+    helperRef: el.ref,
+    ref: formatRef(f.frameId, el.ref),
+    expectEpoch: await expectedEpoch(laneId, tabId, f.frameId),
+    role: el.role,
+    name: el.name,
+    tier,
+    candidates: editables.slice(0, 8),
+    alternatives: [],
+  });
+  if (focused) return mk((focused as any).frame, (focused as any).el, 'focused');
+  if (editables.length === 1) {
+    const only = editables[0];
+    const f = frames.find((x) => x.frameId === only.frame)!;
+    return mk(f, { ref: only.ref.replace(/^f\d+e/, 'ref_'), role: only.role, name: only.name }, 'only-editable');
+  }
+  if (!editables.length) {
+    throw new BrowserActionError('NOT_FOUND', 'No focused or visible editable field on the page. Click the field first, or take a browser_snapshot and pass its ref.');
+  }
+  throw new BrowserActionError('AMBIGUOUS', `Nothing has focus and there are ${editables.length} editable fields — pass the ref of the one you mean: ${editables.slice(0, 8).map(describeCandidate).join(' | ')}`, {
+    count: editables.length,
+    candidates: editables.slice(0, 8),
+  });
 }
 
 /**
@@ -199,103 +184,35 @@ interface FillToolParams {
 class FillTool extends BaseBrowserToolExecutor {
   name = TOOL_NAMES.BROWSER.FILL;
 
-  /**
-   * Execute fill operation
-   */
   async execute(args: FillToolParams): Promise<ToolResult> {
-    const { selector, selectorType = 'css', ref, value, frameId } = args;
-
-    console.log(`Starting fill operation with options:`, args);
-
-    // NOTE: selector/ref are OPTIONAL by design. With neither, fill-helper's
-    // __kResolveFillTarget targets the focused editable element (else the single
-    // visible editable box) — the auto-focused compose field case, which is how
-    // rich-text composers (LinkedIn, Gmail) are actually filled since their real
-    // editors are hashed-class contenteditables no selector can name. Guarding
-    // on selector here made that path unreachable dead code.
-
+    const { value } = args;
     if (value === undefined || value === null) {
-      return createErrorResponse(ERROR_MESSAGES.INVALID_PARAMETERS + ': Value must be provided');
+      return createStructuredError('EXECUTION_ERROR', 'value must be provided');
     }
-
+    const laneId = args.laneId || 'default';
+    const budget = args.timeoutMs && args.timeoutMs > 0 ? args.timeoutMs : 14000;
+    const started = Date.now();
     try {
-      // Target the single channel tab the agent drives (same tab navigate steers).
       const tab = await this.resolveTargetTab(args);
-      if (!tab.id) {
-        return createErrorResponse(ERROR_MESSAGES.TAB_NOT_FOUND + ': Active tab has no ID');
-      }
+      if (!tab.id) return createStructuredError('NO_FRAME_ACCESS', 'The channel tab has no id');
+      const tabId = tab.id;
 
-      let finalRef = ref;
-      let finalSelector = selector;
+      const target =
+        args.ref || args.selector
+          ? await resolveTarget(tabId, laneId, { ref: args.ref, selector: args.selector, frame: args.frame, nth: args.nth, strict: args.strict, kind: 'fill' })
+          : await resolveFocusedEditable(tabId, laneId, args.frame);
+      console.log(`[BC] fill resolve ${args.ref || args.selector || '(focused)'} → ${target.ref} (${target.role} "${target.name}", frame f${target.frameId}, tier ${target.tier})`);
 
-      // If selector is XPath, convert to ref first
-      if (selector && selectorType === 'xpath') {
-        await this.injectContentScript(tab.id, ['inject-scripts/accessibility-tree-helper.js']);
-        try {
-          const resolved = await this.sendMessageToTab(
-            tab.id,
-            {
-              action: TOOL_MESSAGE_TYPES.ENSURE_REF_FOR_SELECTOR,
-              selector,
-              isXPath: true,
-            },
-            frameId,
-          );
-          if (resolved && resolved.success && resolved.ref) {
-            finalRef = resolved.ref;
-            finalSelector = undefined; // Use ref instead of selector
-          } else {
-            return createErrorResponse(
-              `Failed to resolve XPath selector: ${resolved?.error || 'unknown error'}`,
-            );
-          }
-        } catch (error) {
-          return createErrorResponse(
-            `Error resolving XPath: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }
+      await ensureCore(tabId, target.frameId);
+      await this.injectContentScript(tabId, ['inject-scripts/fill-helper.js'], false, 'ISOLATED', false, [target.frameId]);
 
-      // Search every frame — rich-text composers commonly live in a same-origin
-      // child frame, where a top-frame-only fill finds no editable at all.
-      const frameIds = await this.listFrameIds(tab.id, frameId);
-      let result: any = null;
-      let lastError = '';
-      for (const fid of frameIds) {
-        try {
-          await this.injectContentScript(
-            tab.id,
-            ['inject-scripts/fill-helper.js'],
-            false,
-            'ISOLATED',
-            false,
-            fid === undefined ? undefined : [fid],
-          );
-          const r = await this.sendMessageToTab(
-            tab.id,
-            {
-              action: TOOL_MESSAGE_TYPES.FILL_ELEMENT,
-              selector: finalSelector,
-              ref: finalRef,
-              value,
-            },
-            fid,
-          );
-          if (r && !r.error) {
-            result = r;
-            break;
-          }
-          lastError = (r && r.error) || lastError;
-        } catch (e) {
-          lastError = e instanceof Error ? e.message : String(e);
-        }
-      }
-
-      if (!result) {
-        return createErrorResponse(
-          lastError || 'No frame on this page contained a fillable element',
+      const { result, settle } = await withSettle({ tabId, laneId, budgetMs: budget - 300, quietMs: 200, capMs: 1500 }, async () => {
+        return this.sendMessageToTab(
+          tabId,
+          { action: TOOL_MESSAGE_TYPES.FILL_ELEMENT, ref: target.helperRef, expect_epoch: target.expectEpoch, value },
+          target.frameId,
         );
-      }
+      });
 
       return {
         content: [
@@ -303,18 +220,21 @@ class FillTool extends BaseBrowserToolExecutor {
             type: 'text',
             text: JSON.stringify({
               success: true,
-              message: result.message || 'Fill operation successful',
-              elementInfo: result.elementInfo,
+              message: (result && result.message) || 'Fill operation successful',
+              ref: target.ref,
+              frame: frameInfo(target),
+              target: { role: target.role, name: target.name, tier: target.tier },
+              elementInfo: result && result.elementInfo,
+              alternatives: altList(target),
+              settle,
+              took_ms: Date.now() - started,
             }),
           },
         ],
         isError: false,
       };
-    } catch (error) {
-      console.error('Error in fill operation:', error);
-      return createErrorResponse(
-        `Error filling element: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    } catch (e) {
+      return structuredErrorFromException(e);
     }
   }
 }

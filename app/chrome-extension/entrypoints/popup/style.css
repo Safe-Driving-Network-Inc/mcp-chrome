@@ -157,6 +157,15 @@ body {
   margin: 10px 0 0;
   min-height: 14px;
 }
+.kc-foot {
+  color: var(--kn-idle);
+  font-size: 10px;
+  margin: 6px 0 0;
+  min-height: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* Learn Mode block: same panel language; the recording state borrows the error
    red for the classic "recording" affordance without adding a new token. */
 .kc-learn {
