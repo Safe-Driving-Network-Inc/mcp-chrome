@@ -236,6 +236,26 @@ step "Building chrome-mcp-shared"
 ok "shared package built"
 
 # =============================================================================
+# 4b. Type-check the Kareenos channel files (added 1.3.1)
+#
+# `wxt zip` compiles with esbuild, which never type-checks: 1.3.0 shipped with
+# browser-channel-client.ts calling getManagedBootstrap / setChannelMode /
+# isHosted WITHOUT importing them. The bundle built fine, then threw
+# ReferenceError at the first connect() in every install — no socket, no bind,
+# popup stuck on "…". The upstream tree carries ~140 pre-existing type errors
+# we do not own, so only errors in the files listed here fail the release.
+# =============================================================================
+step "Type-checking the Kareenos channel files"
+CHANNEL_FILES='entrypoints/background/browser-channel-client\.ts|entrypoints/background/channel-mode\.ts|entrypoints/background/channel-trail\.ts|entrypoints/background/index\.ts|entrypoints/background/learn-mode|entrypoints/popup/main\.ts|entrypoints/kareenos-connect\.content\.ts|common/browser-channel-adapter'
+TSC_OUT="$(cd "$EXT_DIR" && npx vue-tsc --noEmit -p tsconfig.json 2>&1 || true)"
+CHANNEL_ERRORS="$(printf '%s\n' "$TSC_OUT" | grep -E "($CHANNEL_FILES)" | grep -E 'error TS' || true)"
+if [[ -n "$CHANNEL_ERRORS" ]]; then
+  printf '%s\n' "$CHANNEL_ERRORS" >&2
+  die "type errors in the Kareenos channel files (above) — the bundle would build and then fail at runtime"
+fi
+ok "channel files type-check clean ($(printf '%s\n' "$TSC_OUT" | grep -c 'error TS' || true) pre-existing errors elsewhere, ignored)"
+
+# =============================================================================
 # 5. Clean .output
 #
 # The root `clean:dist` only removes dist/.turbo and misses .output entirely —

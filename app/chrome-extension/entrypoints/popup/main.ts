@@ -36,6 +36,8 @@ interface StateInfo {
   renewable?: boolean;
   bound_since?: number | null;
   last_error?: string | null;
+  mode?: 'attended' | 'hosted';
+  trail?: string[];
   superseded_by?: any;
   version?: string | null;
 }
@@ -63,6 +65,10 @@ app.innerHTML = `
       <p class="kc-note" id="kc-learn-note"></p>
     </div>
     <p class="kc-note" id="kc-note"></p>
+    <details class="kc-diag" id="kc-diag">
+      <summary>Diagnostics</summary>
+      <pre id="kc-trail"></pre>
+    </details>
     <p class="kc-foot" id="kc-foot"></p>
   </div>`;
 
@@ -127,6 +133,12 @@ function renderInfo(info: StateInfo) {
   }
   $('kc-note').textContent = note;
   ($('kc-foot') as HTMLElement).dataset.vm = info.vm_id || '';
+  // Diagnostics: the background's step trail (never tokens). Opened by default
+  // whenever a Cloud Browser is not bound — the one place an operator can read
+  // what the extension did without DevTools (policy-disabled in a VM).
+  const trail = Array.isArray(info.trail) ? info.trail : [];
+  $('kc-trail').textContent = trail.length ? trail.join('\n') : '(no events recorded yet)';
+  ($('kc-diag') as HTMLDetailsElement).open = hosted && state !== 'bound';
   // Support footer: version + token expiry + last error — what a "why am I
   // signed out?" report needs and what nobody can see otherwise.
   let version = info.version || '';

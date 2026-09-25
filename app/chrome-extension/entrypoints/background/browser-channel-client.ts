@@ -55,6 +55,12 @@ import {
   failureEnvelope,
   type CommandEnvelope,
 } from '@/common/browser-channel-adapter';
+// 1.3.0 shipped WITHOUT this import: the bundle called getManagedBootstrap /
+// setChannelMode / isHosted as globals, connect() threw ReferenceError before
+// ever opening the socket, and the popup's state query never answered. The
+// build does not type-check (esbuild), so the release script now does (1.3.1).
+import { getManagedBootstrap, setChannelMode, isHosted, getChannelMode, lastManagedRead } from './channel-mode';
+import { trace, getTrail, primeTrail } from './channel-trail';
 
 const ALARM_NAME = 'kareenos-browser-channel-heartbeat';
 // storage.local: { token, exp, session_id, renewable } — written ONLY by this module.
@@ -129,6 +135,7 @@ let channelLoadInFlight: Promise<ChannelRecord | null> | null = null;
 let channelLoadError: string | null = null; // last storage READ failure (not "no token")
 
 function setState(s: ConnState) {
+  if (s !== state) trace('state ' + state + ' -> ' + s, lastError && s !== 'bound' ? { err: lastError } : undefined);
   state = s;
   // Surface to the popup / welcome page (best effort).
   try {
@@ -160,6 +167,7 @@ function describeState() {
     superseded_by: supersededBy,
     version,
     hosted: isHosted(),
+    mode: getChannelMode(),
     vm_id: (rec && rec.vm_id) || hostedVmId || null,
   };
 }
@@ -434,9 +442,91 @@ function scheduleReconnect() {
   const jitter = Math.floor(Math.random() * backoffMs * 0.3);
   const delay = backoffMs + jitter;
   backoffMs = Math.min(backoffMs * 2, BACKOFF_MAX_MS);
+  trace('reconnect scheduled', { in_ms: delay });
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect('backoff');
+  }, delay);
+}
+
+// A storage/API read that never settles would wedge connect() for the whole
+// worker lifetime (connectInFlight stays set, every later nudge returns early
+// with no trace of why). Every read on the connect path has a deadline: on
+// timeout we log it, take the fallback and carry on.
+function withTimeout<T>(p: Promise<T>, ms: number, label: string, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let done = false;
+    const t = setTimeout(() => {
+      if (done) return;
+      done = true;
+      trace('timeout: ' + label, { ms });
+      resolve(fallback);
+    }, ms);
+    p.then(
+      (v) => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        trace('failed: ' + label, { err: String((e && e.message) || e) });
+        resolve(fallback);
+      },
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap watch (1.3.1) — Chrome fills chrome.storage.managed for a freshly
+// force-installed extension some time AFTER the worker's first spin-up, and the
+// `managed` onChanged notification is not something every Chromium build
+// delivers to a worker that has just started. While we hold no live socket, the
+// managed area is re-read on this schedule (≈3 minutes, cheap local reads) and
+// connect() runs the moment a bootstrap is there. Stops on bind.
+// ---------------------------------------------------------------------------
+const WATCH_SCHEDULE_S = [2, 3, 5, 5, 10, 10, 15, 15, 20, 30, 30, 30];
+let watchTimer: ReturnType<typeof setTimeout> | null = null;
+let watchIdx = 0;
+
+function stopBootstrapWatch() {
+  if (watchTimer) clearTimeout(watchTimer);
+  watchTimer = null;
+}
+
+function armBootstrapWatch(why: string) {
+  if (watchTimer) return;
+  watchIdx = 0;
+  trace('watch armed', { why });
+  tickBootstrapWatch();
+}
+
+function tickBootstrapWatch() {
+  if (watchIdx >= WATCH_SCHEDULE_S.length) {
+    watchTimer = null;
+    trace('watch done', { state, mode: getChannelMode() });
+    return;
+  }
+  const delay = WATCH_SCHEDULE_S[watchIdx++] * 1000;
+  watchTimer = setTimeout(async () => {
+    watchTimer = null;
+    if (current && (current.bound || current.ws.readyState === WebSocket.CONNECTING || current.ws.readyState === WebSocket.OPEN)) {
+      trace('watch stop: socket live', { bound: current.bound });
+      return;
+    }
+    const b = await withTimeout(getManagedBootstrap(), 4000, 'managed read (watch)', null);
+    const info = lastManagedRead();
+    trace('watch tick', { boot: !!b, keys: info.keys, tok: info.has_token, err: info.err, state });
+    if (b && state !== 'connecting') {
+      cancelReconnect();
+      backoffMs = BACKOFF_MIN_MS;
+      if (state === 'signed_out') setState('disconnected');
+      connect('watch');
+    }
+    tickBootstrapWatch();
   }, delay);
 }
 
@@ -525,6 +615,7 @@ function handleBindAck(c: Conn, frame: any, boot: any) {
     clearTimeout(c.connectTimer);
     c.connectTimer = null;
   }
+  trace('bind_ack', { ok: !!frame.ok, reason: frame.ok ? undefined : String(frame.reason || 'UNKNOWN'), kind: frame.kind || null, vm: frame.vm_id || null, token: !!frame.token });
   if (frame.ok) {
     // Sliding renewal — persist BEFORE declaring bound; a persist failure keeps
     // the old (still valid) token in memory. In hosted mode the first ack turns
@@ -556,6 +647,7 @@ function handleBindAck(c: Conn, frame: any, boot: any) {
       boundSince = Date.now();
       backoffMs = BACKOFF_MIN_MS;
       lastError = null;
+      stopBootstrapWatch();
       setState('bound');
       startPing(c);
       maybeRequestRenewal(c);
@@ -599,6 +691,7 @@ function handleBindAck(c: Conn, frame: any, boot: any) {
 function handleClose(c: Conn, code: number, reason: string) {
   clearConnTimers(c);
   if (current === c) current = null;
+  trace('close', { code, reason: reason || '', bound: c.bound });
   if (code === CLOSE_SIGNED_OUT || code === CLOSE_REVOKED) {
     lastError = code === CLOSE_REVOKED ? 'session revoked' : 'signed out';
     clearSignIn()
@@ -623,17 +716,35 @@ async function connect(_why?: string): Promise<void> {
   if (state === 'superseded') return;
   if (current) {
     const rs = current.ws.readyState;
-    if (rs === WebSocket.CONNECTING || rs === WebSocket.OPEN) return;
+    if (rs === WebSocket.CONNECTING || rs === WebSocket.OPEN) {
+      if (!current.bound) trace('connect skipped: socket busy', { why: _why, rs });
+      return;
+    }
     detach(current); // CLOSING/CLOSED leftovers
   }
-  if (connectInFlight) return connectInFlight;
+  if (connectInFlight) {
+    trace('connect skipped: in flight', { why: _why });
+    return connectInFlight;
+  }
   connectInFlight = (async () => {
     cancelReconnect();
-    const rec = await getChannel();
+    trace('connect', { why: _why, state });
+    const rec = await withTimeout(getChannel(), 4000, 'token read', null as ChannelRecord | null);
+    if (rec === null && channelCache === undefined && !channelLoadError) channelLoadError = 'token read timed out';
     // Hosted kind: the K-Desktop runtime bootstraps us through managed storage.
     // Precedence: our stored durable token for the SAME vm → an unspent
     // bootstrap token → wait for the runtime to write a fresh one.
-    const boot = await getManagedBootstrap();
+    const boot = await withTimeout(getManagedBootstrap(), 4000, 'managed read', null);
+    const mread = lastManagedRead();
+    trace('reads', {
+      token: !!(rec && rec.token),
+      kind: (rec && rec.kind) || null,
+      boot: !!boot,
+      keys: mread.keys,
+      boot_tok: mread.has_token,
+      issued: mread.issued_at,
+      merr: mread.err,
+    });
     let bindToken: string | null = rec && rec.token ? rec.token : null;
     let bindKind: 'attended' | 'hosted' = 'attended';
     let bindVm: string | null = null;
@@ -645,13 +756,17 @@ async function connect(_why?: string): Promise<void> {
       bindVm = boot.vm_id || null;
       const nowSec = Math.floor(Date.now() / 1000);
       const durableOk = !!(rec && rec.token && rec.kind === 'hosted' && rec.vm_id === boot.vm_id && (!rec.exp || rec.exp > nowSec + 60));
+      const usedAt = await withTimeout(bootstrapUsedAt(), 3000, 'bootstrap-used read', null as number | null);
       if (durableOk) {
         bindToken = rec!.token;
-      } else if (boot.token && (await bootstrapUsedAt()) !== (boot.issued_at || 0)) {
+        trace('hosted: durable token', { vm: boot.vm_id || null });
+      } else if (boot.token && usedAt !== (boot.issued_at || 0)) {
         bindToken = boot.token;
         bindingWithBootstrap = true;
+        trace('hosted: bootstrap token', { vm: boot.vm_id || null, issued: boot.issued_at || 0 });
       } else {
         bindToken = null;
+        trace('hosted: nothing usable', { boot_tok: !!boot.token, used_at: usedAt, issued: boot.issued_at || 0 });
       }
       if (!bindToken) {
         // Nothing usable: the runtime rewrites the policy on the next start/resume
@@ -663,7 +778,7 @@ async function connect(_why?: string): Promise<void> {
     } else {
       setChannelMode('attended');
     }
-    const url = boot && boot.ws_url ? boot.ws_url : await getServerUrl();
+    const url = boot && boot.ws_url ? boot.ws_url : await withTimeout(getServerUrl(), 3000, 'server url read', DEFAULT_SERVER_URL);
     if (!bindToken || !url) {
       if (channelCache === undefined && channelLoadError) {
         // Storage could not be read — we do not KNOW there is no token. Stay
@@ -679,9 +794,11 @@ async function connect(_why?: string): Promise<void> {
     setState('connecting');
     let ws: WebSocket;
     try {
+      trace('ws open', { url, kind: bindKind, boot: bindingWithBootstrap });
       ws = new WebSocket(url);
     } catch (e: any) {
       lastError = 'WebSocket() failed: ' + (e?.message || e);
+      trace('ws ctor failed', { err: lastError });
       setState('disconnected');
       scheduleReconnect();
       return;
@@ -691,6 +808,7 @@ async function connect(_why?: string): Promise<void> {
     c.connectTimer = setTimeout(() => {
       if (current !== c || c.bound) return;
       lastError = 'connect/bind timeout';
+      trace('connect/bind timeout', { rs: c.ws.readyState });
       detach(c);
       setState('disconnected');
       scheduleReconnect();
@@ -698,6 +816,7 @@ async function connect(_why?: string): Promise<void> {
 
     ws.onopen = () => {
       if (current !== c) return;
+      trace('ws opened, bind sent', { kind: bindKind });
       try {
         // Attended: exactly the frame it always was. Hosted: kind + vm_id ride
         // along (advisory — the token is authoritative on the server).
@@ -759,6 +878,7 @@ async function connect(_why?: string): Promise<void> {
     ws.onerror = () => {
       if (current !== c) return;
       lastError = 'socket error';
+      trace('ws error', { rs: c.ws.readyState });
       // onclose follows and drives the reconnect.
     };
   })().finally(() => {
@@ -874,6 +994,14 @@ async function takeOver(): Promise<void> {
 // Init — every listener registered synchronously (MV3 requirement)
 // ---------------------------------------------------------------------------
 export function initBrowserChannelClient() {
+  primeTrail();
+  let v: string | null = null;
+  try {
+    v = chrome.runtime.getManifest().version || null;
+  } catch (e) {
+    /* ignore */
+  }
+  trace('worker spin-up', { v });
   const nudge = (why: string) => () => {
     // Idempotent: returns immediately when a socket is connecting/open, and does
     // nothing in signed_out (no token) or superseded (user decision pending).
@@ -898,7 +1026,9 @@ export function initBrowserChannelClient() {
         }
       });
     chrome.alarms.onAlarm.addListener((alarm) => {
-      if (alarm.name === ALARM_NAME) nudge('alarm')();
+      if (alarm.name !== ALARM_NAME) return;
+      if (!(current && current.bound)) trace('alarm', { state });
+      nudge('alarm')();
     });
   } catch (e) {
     /* alarms unavailable in some contexts */
@@ -918,7 +1048,11 @@ export function initBrowserChannelClient() {
     /* ignore */
   }
   try {
-    chrome.runtime.onInstalled.addListener(() => connect('installed'));
+    chrome.runtime.onInstalled.addListener((d) => {
+      trace('onInstalled', { reason: d && d.reason, prev: (d && d.previousVersion) || null });
+      connect('installed');
+      armBootstrapWatch('installed');
+    });
   } catch (e) {
     /* ignore */
   }
@@ -953,10 +1087,10 @@ export function initBrowserChannelClient() {
       if (!msg || !msg.type) return;
       if (msg.type === 'browser_channel_get_state') {
         // Make sure the token record is loaded so has_token is truthful even on a
-        // freshly spun-up worker.
-        getChannel()
-          .catch(() => null)
-          .then(() => sendResponse(describeState()));
+        // freshly spun-up worker. The diagnostics trail rides along for the popup.
+        Promise.all([getChannel().catch(() => null), getTrail(16).catch(() => [] as string[])])
+          .then(([, trail]) => sendResponse({ ...describeState(), trail }))
+          .catch(() => sendResponse(describeState()));
         return true;
       }
       if (msg.type === 'browser_channel_reconnect') {
@@ -1008,11 +1142,14 @@ export function initBrowserChannelClient() {
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'managed' || !changes || !changes.kareenos_bootstrap) return;
+      const nv = changes.kareenos_bootstrap.newValue;
+      trace('managed changed', { has_new: !!nv, vm: (nv && nv.vm_id) || null, tok: !!(nv && nv.token), bound: !!(current && current.bound) });
       if (current && current.bound) return;
       cancelReconnect();
       backoffMs = BACKOFF_MIN_MS;
       if (state === 'waiting_bootstrap' || state === 'signed_out') setState('disconnected');
       connect('managed-change');
+      armBootstrapWatch('managed-change');
     });
   } catch (e) {
     /* ignore */
@@ -1027,4 +1164,6 @@ export function initBrowserChannelClient() {
   // Attempt an initial connection on spin-up (also covers the post-eviction wake:
   // whatever woke the worker, we re-bind right away instead of waiting for the alarm).
   connect('spin-up');
+  // …and keep looking for a managed bootstrap for a few minutes (see the watch).
+  armBootstrapWatch('spin-up');
 }

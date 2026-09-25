@@ -34,16 +34,25 @@ export default defineBackground(() => {
     if (details.reason === 'install') {
       // In a Kareenos Cloud Browser (force-installed, bootstrapped through
       // managed storage) a welcome tab would open inside the user's live view.
-      getManagedBootstrap()
-        .then((boot) => {
-          if (boot) return;
-          try {
-            chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
-          } catch (e) {
-            console.warn('[Kareenos] could not open welcome page:', e);
-          }
-        })
-        .catch(() => {});
+      // Chrome fills the managed area a moment AFTER install, so look three
+      // times over ~6 s before deciding this is an attended install.
+      const decide = (attempt: number) => {
+        getManagedBootstrap()
+          .then((boot) => {
+            if (boot) return;
+            if (attempt < 3) {
+              setTimeout(() => decide(attempt + 1), 2000);
+              return;
+            }
+            try {
+              chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
+            } catch (e) {
+              console.warn('[Kareenos] could not open welcome page:', e);
+            }
+          })
+          .catch(() => {});
+      };
+      decide(0);
     }
   });
 
