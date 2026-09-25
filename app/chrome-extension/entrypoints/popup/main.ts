@@ -12,7 +12,7 @@
 // says "Use this browser".
 import './style.css';
 
-type ConnState = 'signed_out' | 'disconnected' | 'connecting' | 'bound' | 'superseded';
+type ConnState = 'signed_out' | 'disconnected' | 'connecting' | 'bound' | 'superseded' | 'waiting_bootstrap';
 
 const CONNECT_URL_KEY = 'kareenos_connect_url';
 const DEFAULT_CONNECT_URL =
@@ -24,9 +24,12 @@ const STATE_LABEL: Record<ConnState, string> = {
   connecting: 'Connecting…',
   bound: 'Connected',
   superseded: 'Another browser took over',
+  waiting_bootstrap: 'Waiting for Kareenos…',
 };
 
 interface StateInfo {
+  hosted?: boolean;
+  vm_id?: string | null;
   state: ConnState;
   has_token?: boolean;
   exp?: number | null;
@@ -40,7 +43,7 @@ interface StateInfo {
 const app = document.getElementById('app')!;
 app.innerHTML = `
   <div class="kc">
-    <div class="kc-head"><img class="kc-mark" src="/icon/32.png" alt="" /><h1 id="kc-title">Kareenos Extension</h1><span class="kc-dot" id="kc-dot"></span></div>
+    <div class="kc-head"><img class="kc-mark" src="/icon/32.png" alt="" /><h1 id="kc-title">Kareenos Extension</h1><span class="kc-badge" id="kc-badge" hidden>Cloud Browser</span><span class="kc-dot" id="kc-dot"></span></div>
     <div class="kc-row"><span class="kc-k">Status</span><span class="kc-v" id="kc-status">…</span></div>
     <div class="kc-row"><span class="kc-k">Account</span><span class="kc-v" id="kc-account">—</span></div>
     <div class="kc-row"><span class="kc-k">Project</span><span class="kc-v" id="kc-project">—</span></div>
@@ -89,14 +92,23 @@ function renderInfo(info: StateInfo) {
   $('kc-status').textContent = STATE_LABEL[state] || state;
   $('kc-dot').className = 'kc-dot kc-' + state;
   const hasToken = info.has_token !== false && state !== 'signed_out';
+  const hosted = info.hosted === true;
+  ($('kc-badge') as HTMLElement).hidden = !hosted;
   // No token ⇒ the identity rows are a memory of the last sign-in, not a session.
   document.querySelectorAll('.kc-row').forEach((el) => el.classList.toggle('kc-stale', !hasToken));
-  ($('kc-signin') as HTMLButtonElement).hidden = hasToken && state !== 'superseded';
+  ($('kc-signin') as HTMLButtonElement).hidden = hosted || (hasToken && state !== 'superseded');
   ($('kc-signin') as HTMLButtonElement).textContent = hasToken ? 'Sign in again' : 'Sign in';
-  ($('kc-takeover') as HTMLButtonElement).hidden = state !== 'superseded';
-  ($('kc-disconnect') as HTMLButtonElement).hidden = !hasToken;
+  ($('kc-takeover') as HTMLButtonElement).hidden = hosted || state !== 'superseded';
+  ($('kc-disconnect') as HTMLButtonElement).hidden = hosted || !hasToken;
   let note = '';
-  if (state === 'bound') {
+  if (hosted) {
+    note =
+      state === 'bound'
+        ? 'Running in a Kareenos Cloud Browser — managed by the platform. Agents act here; take control from the live view in Kareenos.'
+        : state === 'waiting_bootstrap'
+          ? 'Running in a Kareenos Cloud Browser — waiting for the platform to hand over a bind token.'
+          : 'Running in a Kareenos Cloud Browser — reconnecting to the platform.' + (info.last_error ? ' (' + info.last_error + ')' : '');
+  } else if (state === 'bound') {
     note = 'Agents can act in this browser. Stays connected across restarts';
     if (info.renewable === false && info.exp) note += ' — sign in again before ' + fmtDate(info.exp);
     else if (info.exp) note += '; the sign-in renews itself (valid until ' + fmtDate(info.exp) + ')';
@@ -114,6 +126,7 @@ function renderInfo(info: StateInfo) {
       : 'Sign in to connect this browser to a Kareenos project.';
   }
   $('kc-note').textContent = note;
+  ($('kc-foot') as HTMLElement).dataset.vm = info.vm_id || '';
   // Support footer: version + token expiry + last error — what a "why am I
   // signed out?" report needs and what nobody can see otherwise.
   let version = info.version || '';

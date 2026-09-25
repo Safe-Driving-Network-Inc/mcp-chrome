@@ -12,7 +12,13 @@ const PING_TIMEOUT_MS = 300;
 // own window — so the user sees progress when they switch to Chrome themselves,
 // and screenshot's captureVisibleTab targets the right tab — but Chrome never
 // pops in front. Flip to true only if you want the browser to follow the agent.
-export const BRING_WINDOW_TO_FRONT = false;
+export const BRING_WINDOW_TO_FRONT_DEFAULT = false;
+// In a Kareenos Cloud Browser (hosted kind) the live view IS the point: the
+// lane's tab must be the visible one and a popup window must come back to
+// front, so both flags flip to true there. Attended keeps the defaults.
+import { isHosted } from '../channel-mode';
+export function bringWindowToFront(): boolean { return isHosted() ? true : BRING_WINDOW_TO_FRONT_DEFAULT; }
+export const BRING_WINDOW_TO_FRONT = BRING_WINDOW_TO_FRONT_DEFAULT;
 
 // Keep the agent's tab ACTIVE within its window? When false (fully background),
 // the agent never switches the tab the user is currently looking at — screenshots
@@ -22,7 +28,9 @@ export const BRING_WINDOW_TO_FRONT = false;
 // which can make reads flaky on very dynamic pages. If automation gets flaky on
 // such a site, flip this to true so the channel tab stays active in its window
 // (it still never raises Chrome to the OS foreground — that's BRING_WINDOW_TO_FRONT).
-export const ACTIVATE_CHANNEL_TAB = false;
+export const ACTIVATE_CHANNEL_TAB_DEFAULT = false;
+export function activateChannelTab(): boolean { return isHosted() ? true : ACTIVATE_CHANNEL_TAB_DEFAULT; }
+export const ACTIVATE_CHANNEL_TAB = ACTIVATE_CHANNEL_TAB_DEFAULT;
 
 // Kareenos attended browser channel — each LANE (one concurrent agent task on
 // the server) drives exactly ONE tab. The laneId→tab map lives in
@@ -427,7 +435,7 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
     const activate = options.activate === true;
     const focusWindow = options.focusWindow === true;
     // Never raise Chrome to the OS foreground unless explicitly enabled.
-    if (focusWindow && BRING_WINDOW_TO_FRONT && typeof tab.windowId === 'number') {
+    if (focusWindow && bringWindowToFront() && typeof tab.windowId === 'number') {
       await chrome.windows.update(tab.windowId, { focused: true });
     }
     if (activate && typeof tab.id === 'number') {

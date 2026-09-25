@@ -200,3 +200,7 @@ body {
   border-color: var(--kn-err);
   color: #fff;
 }
+
+/* Hosted kind (Kareenos Cloud Browser) */
+.kc-badge { margin-left: 8px; padding: 2px 8px; border-radius: 999px; background: var(--kn-brand, #4f46e5); color: #fff; font-size: 11px; font-weight: 600; letter-spacing: 0.01em; }
+.kc-dot.kc-waiting_bootstrap { background: #f59e0b; }

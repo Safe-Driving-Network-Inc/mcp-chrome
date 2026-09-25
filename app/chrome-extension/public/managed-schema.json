@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "properties": {
+    "kareenos_bootstrap": {
+      "title": "Kareenos Cloud Browser bootstrap",
+      "description": "Written by the K-Desktop host agent into a Chromium managed policy (3rdparty.extensions.<id>). A single-use, short-lived bind token plus the labels the popup shows. Never present on an attended (user-installed) extension.",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "vm_id": { "type": "string" },
+        "ws_url": { "type": "string" },
+        "api_url": { "type": "string" },
+        "issued_at": { "type": "integer" },
+        "label": {
+          "type": "object",
+          "properties": {
+            "project_name": { "type": "string" },
+            "account_name": { "type": "string" },
+            "user_name": { "type": "string" },
+            "projectid": { "type": "string" },
+            "accountid": { "type": "string" },
+            "userid": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

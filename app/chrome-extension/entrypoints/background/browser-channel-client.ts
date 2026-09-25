@@ -94,13 +94,16 @@ const CLOSE_SIGNED_OUT = 4000;
 const CLOSE_SUPERSEDED = 4001;
 const CLOSE_REVOKED = 4003;
 
-export type ConnState = 'signed_out' | 'disconnected' | 'connecting' | 'bound' | 'superseded';
+export type ConnState = 'signed_out' | 'disconnected' | 'connecting' | 'bound' | 'superseded' | 'waiting_bootstrap';
 
 interface ChannelRecord {
   token: string;
   exp?: number | null; // epoch seconds
   session_id?: string | null;
   renewable?: boolean;
+  // Hosted kind (Kareenos Cloud Browser): the durable token is bound to ONE VM.
+  kind?: 'attended' | 'hosted';
+  vm_id?: string | null;
 }
 
 // One live socket + its private timers. Everything that can fire late is keyed on
@@ -156,7 +159,22 @@ function describeState() {
     last_error: lastError,
     superseded_by: supersededBy,
     version,
+    hosted: isHosted(),
+    vm_id: (rec && rec.vm_id) || hostedVmId || null,
   };
+}
+let hostedVmId: string | null = null;
+const BOOTSTRAP_USED_KEY = 'kareenos_bootstrap_used';
+// A bootstrap token is single-use on the server; remember which issue we spent
+// so a policy refresh that repeats the same object does not trigger a replay.
+async function bootstrapUsedAt(): Promise<number | null> {
+  try {
+    const got = await chrome.storage.local.get(BOOTSTRAP_USED_KEY);
+    const v = got && got[BOOTSTRAP_USED_KEY];
+    return v && typeof v.issued_at === 'number' ? v.issued_at : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -462,12 +480,16 @@ function startPing(c: Conn) {
 // the socket that delivered it is the one we keep using. A frame without a token
 // still updates exp/renewable (renewable:false = past the absolute max age).
 async function persistRenewal(frame: any): Promise<void> {
+  const hosted = frame.kind === 'hosted' || isHosted();
+  const vmId = frame.vm_id || hostedVmId || channelCache?.vm_id || null;
   if (typeof frame.token === 'string' && frame.token) {
     await persistChannel({
       token: frame.token,
       exp: typeof frame.exp === 'number' ? frame.exp : channelCache?.exp || null,
-      session_id: channelCache?.session_id || null,
+      session_id: hosted ? 'hosted:' + (vmId || '') : channelCache?.session_id || null,
       renewable: frame.renewable !== false,
+      kind: hosted ? 'hosted' : 'attended',
+      vm_id: hosted ? vmId : null,
     });
   } else if (channelCache) {
     channelCache = {
@@ -498,14 +520,35 @@ function maybeRequestRenewal(c: Conn) {
   }
 }
 
-function handleBindAck(c: Conn, frame: any) {
+function handleBindAck(c: Conn, frame: any, boot: any) {
   if (c.connectTimer) {
     clearTimeout(c.connectTimer);
     c.connectTimer = null;
   }
   if (frame.ok) {
     // Sliding renewal — persist BEFORE declaring bound; a persist failure keeps
-    // the old (still valid) token in memory.
+    // the old (still valid) token in memory. In hosted mode the first ack turns
+    // the single-use bootstrap into the durable token, and the popup labels come
+    // from the managed policy rather than a sign-in.
+    if (frame.kind === 'hosted') {
+      hostedVmId = frame.vm_id || hostedVmId;
+      if (boot) {
+        chrome.storage.local
+          .set({
+            [BOOTSTRAP_USED_KEY]: { issued_at: boot.issued_at || 0, at: Date.now() },
+            [BOUND_KEY]: {
+              projectid: (boot.label && boot.label.projectid) || null,
+              accountid: (boot.label && boot.label.accountid) || null,
+              userid: (boot.label && boot.label.userid) || null,
+              session_id: 'hosted:' + (boot.vm_id || ''),
+              project_name: (boot.label && boot.label.project_name) || null,
+              account_name: (boot.label && boot.label.account_name) || null,
+              user_name: (boot.label && boot.label.user_name) || null,
+            },
+          })
+          .catch(() => {});
+      }
+    }
     const done = persistRenewal(frame);
     done.catch(() => {}).then(() => {
       if (current !== c) return;
@@ -527,6 +570,20 @@ function handleBindAck(c: Conn, frame: any) {
   const reason = String(frame.reason || 'UNKNOWN');
   lastError = 'bind rejected: ' + reason;
   detach(c);
+  if (isHosted()) {
+    // Hosted: never park in signed_out (there is no user to sign in). A spent or
+    // refused bootstrap waits for the runtime's next policy write; VM_MISMATCH /
+    // TRY_LATER / maintenance retry with backoff.
+    if (reason === 'BOOTSTRAP_REPLAYED' || TERMINAL_REASONS.has(reason)) {
+      if (boot) chrome.storage.local.set({ [BOOTSTRAP_USED_KEY]: { issued_at: boot.issued_at || 0, at: Date.now() } }).catch(() => {});
+      if (TERMINAL_REASONS.has(reason)) clearSignIn().catch(() => {});
+      setState('waiting_bootstrap');
+      return;
+    }
+    setState('disconnected');
+    scheduleReconnect();
+    return;
+  }
   if (TERMINAL_REASONS.has(reason)) {
     // Retrying this token can never work — stop, clear it, tell the user.
     clearSignIn()
@@ -546,7 +603,7 @@ function handleClose(c: Conn, code: number, reason: string) {
     lastError = code === CLOSE_REVOKED ? 'session revoked' : 'signed out';
     clearSignIn()
       .catch(() => {})
-      .then(() => setState('signed_out'));
+      .then(() => setState(isHosted() ? 'waiting_bootstrap' : 'signed_out'));
     return;
   }
   if (code === CLOSE_SUPERSEDED) {
@@ -555,7 +612,7 @@ function handleClose(c: Conn, code: number, reason: string) {
     setState('superseded');
     return; // NO automatic reconnect — see header
   }
-  if (state === 'signed_out' || state === 'superseded') return;
+  if (state === 'signed_out' || state === 'superseded' || state === 'waiting_bootstrap') return;
   lastError = 'socket closed' + (code ? ' (' + code + (reason ? ' ' + reason : '') + ')' : '');
   boundSince = null;
   setState('disconnected');
@@ -573,8 +630,41 @@ async function connect(_why?: string): Promise<void> {
   connectInFlight = (async () => {
     cancelReconnect();
     const rec = await getChannel();
-    const url = await getServerUrl();
-    if (!rec || !rec.token || !url) {
+    // Hosted kind: the K-Desktop runtime bootstraps us through managed storage.
+    // Precedence: our stored durable token for the SAME vm → an unspent
+    // bootstrap token → wait for the runtime to write a fresh one.
+    const boot = await getManagedBootstrap();
+    let bindToken: string | null = rec && rec.token ? rec.token : null;
+    let bindKind: 'attended' | 'hosted' = 'attended';
+    let bindVm: string | null = null;
+    let bindingWithBootstrap = false;
+    if (boot) {
+      setChannelMode('hosted');
+      hostedVmId = boot.vm_id || null;
+      bindKind = 'hosted';
+      bindVm = boot.vm_id || null;
+      const nowSec = Math.floor(Date.now() / 1000);
+      const durableOk = !!(rec && rec.token && rec.kind === 'hosted' && rec.vm_id === boot.vm_id && (!rec.exp || rec.exp > nowSec + 60));
+      if (durableOk) {
+        bindToken = rec!.token;
+      } else if (boot.token && (await bootstrapUsedAt()) !== (boot.issued_at || 0)) {
+        bindToken = boot.token;
+        bindingWithBootstrap = true;
+      } else {
+        bindToken = null;
+      }
+      if (!bindToken) {
+        // Nothing usable: the runtime rewrites the policy on the next start/resume
+        // and the managed-storage change wakes us. No backoff needed.
+        lastError = 'waiting for a Kareenos bootstrap token';
+        setState('waiting_bootstrap');
+        return;
+      }
+    } else {
+      setChannelMode('attended');
+    }
+    const url = boot && boot.ws_url ? boot.ws_url : await getServerUrl();
+    if (!bindToken || !url) {
       if (channelCache === undefined && channelLoadError) {
         // Storage could not be read — we do not KNOW there is no token. Stay
         // recoverable instead of declaring signed_out (which stops all retries).
@@ -609,7 +699,15 @@ async function connect(_why?: string): Promise<void> {
     ws.onopen = () => {
       if (current !== c) return;
       try {
-        ws.send(JSON.stringify({ type: 'bind', token: rec.token }));
+        // Attended: exactly the frame it always was. Hosted: kind + vm_id ride
+        // along (advisory — the token is authoritative on the server).
+        ws.send(
+          JSON.stringify(
+            bindKind === 'hosted'
+              ? { type: 'bind', token: bindToken, kind: 'hosted', vm_id: bindVm }
+              : { type: 'bind', token: bindToken },
+          ),
+        );
       } catch (e) {
         /* connect timer covers it */
       }
@@ -624,7 +722,7 @@ async function connect(_why?: string): Promise<void> {
       }
       switch (frame.type) {
         case 'bind_ack':
-          handleBindAck(c, frame);
+          handleBindAck(c, frame, bindingWithBootstrap ? boot : null);
           break;
         case 'command':
           if (c.bound) handleCommand(frame as CommandEnvelope);
@@ -676,6 +774,11 @@ async function connect(_why?: string): Promise<void> {
 // (relayed by the content script or externally_connectable). A fresh sign-in
 // always wins: it replaces any current socket and leaves `superseded`.
 async function storeSignIn(msg: any): Promise<void> {
+  if (isHosted()) {
+    // A Cloud Browser is bound by the platform, never by a connect-page sign-in.
+    console.warn('[Kareenos] sign-in ignored: this extension runs in a Kareenos Cloud Browser');
+    return;
+  }
   supersededBy = null;
   lastError = null;
   backoffMs = BACKOFF_MIN_MS;
@@ -897,6 +1000,29 @@ export function initBrowserChannelClient() {
   } catch (e) {
     /* ignore */
   }
+
+  // Hosted kind: the K-Desktop runtime (re)writes our managed policy at every
+  // start/resume and scrubs the token after we bound. Only a change while we are
+  // NOT bound matters (a spent token is replaced by a fresh one). Listening on
+  // the `managed` area only — the no-onChanged rule above is about `local`.
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'managed' || !changes || !changes.kareenos_bootstrap) return;
+      if (current && current.bound) return;
+      cancelReconnect();
+      backoffMs = BACKOFF_MIN_MS;
+      if (state === 'waiting_bootstrap' || state === 'signed_out') setState('disconnected');
+      connect('managed-change');
+    });
+  } catch (e) {
+    /* ignore */
+  }
+  getManagedBootstrap()
+    .then((b) => {
+      setChannelMode(b ? 'hosted' : 'attended');
+      if (b) hostedVmId = b.vm_id || null;
+    })
+    .catch(() => {});
 
   // Attempt an initial connection on spin-up (also covers the post-eviction wake:
   // whatever woke the worker, we re-bind right away instead of waiting for the alarm).

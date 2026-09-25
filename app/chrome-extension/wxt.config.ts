@@ -83,6 +83,16 @@ export default defineConfig({
       'sidePanel',
     ],
     host_permissions: ['<all_urls>'],
+    // Managed storage (chrome.storage.managed) is how a Kareenos Cloud Browser
+    // (K-Desktop, §5.108) hands the extension its bootstrap bind token: the
+    // host agent writes a Chromium policy file with `3rdparty.extensions.<id>`
+    // and Chromium exposes it here — but ONLY for keys declared in this schema.
+    // Attended installs never have a policy, so the area is simply empty.
+    storage: { managed_schema: 'managed-schema.json' },
+    // Off-store auto-update endpoint (updates.xml + CRX on kareenos.com). Only
+    // meaningful for the policy-installed Cloud Browser copy; Chrome ignores it
+    // for load-unpacked installs, so attended users see no change.
+    ...(process.env.VITE_EXTENSION_UPDATE_URL ? { update_url: process.env.VITE_EXTENSION_UPDATE_URL } : {}),
     // Let the Kareenos connect page sign the extension in directly (the
     // content-script relay is the parallel, opener-topology-independent path).
     externally_connectable: { matches: KAREENOS_CONNECT_MATCHES },

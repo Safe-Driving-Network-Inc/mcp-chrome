@@ -24,17 +24,26 @@ const ENABLE_RR_V3 = true;
  * Background script entry point
  * Initializes all background services and listeners
  */
+import { getManagedBootstrap } from './channel-mode';
+
 export default defineBackground(() => {
   // On fresh install, open the Kareenos onboarding page that guides the user
   // through connecting the extension to the platform. Only on 'install' (not on
   // update/reload) so we don't nag on every rebuild.
   chrome.runtime.onInstalled.addListener((details) => {
     if (details.reason === 'install') {
-      try {
-        chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
-      } catch (e) {
-        console.warn('[Kareenos] could not open welcome page:', e);
-      }
+      // In a Kareenos Cloud Browser (force-installed, bootstrapped through
+      // managed storage) a welcome tab would open inside the user's live view.
+      getManagedBootstrap()
+        .then((boot) => {
+          if (boot) return;
+          try {
+            chrome.tabs.create({ url: chrome.runtime.getURL('welcome.html') });
+          } catch (e) {
+            console.warn('[Kareenos] could not open welcome page:', e);
+          }
+        })
+        .catch(() => {});
     }
   });
 

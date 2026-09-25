@@ -11,8 +11,8 @@
 import { createErrorResponse, ToolResult } from '@/common/tool-handler';
 import {
   BaseBrowserToolExecutor,
-  BRING_WINDOW_TO_FRONT,
-  ACTIVATE_CHANNEL_TAB,
+  bringWindowToFront,
+  activateChannelTab,
 } from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
 import { TOOL_MESSAGE_TYPES } from '@/common/message-types';
@@ -78,8 +78,8 @@ class WebFetcherTool extends BaseBrowserToolExecutor {
       const tabId = tab.id;
 
       if (!background) {
-        if (ACTIVATE_CHANNEL_TAB) await chrome.tabs.update(tabId, { active: true });
-        if (BRING_WINDOW_TO_FRONT) await chrome.windows.update(tab.windowId, { focused: true });
+        if (activateChannelTab()) await chrome.tabs.update(tabId, { active: true });
+        if (bringWindowToFront()) await chrome.windows.update(tab.windowId, { focused: true });
       }
 
       const result: any = { success: true, url: tab.url, title: tab.title };

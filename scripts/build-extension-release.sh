@@ -332,6 +332,46 @@ ok "$ZIP_HUMAN ($ZIP_BYTES bytes)"
 dim "sha256 $ZIP_SHA"
 
 # =============================================================================
+# 8b. CRX3 + update manifest — the Cloud Browser (K-Desktop) copy
+# =============================================================================
+# Chromium in a Cloud Browser force-installs the extension from OUR update
+# endpoint (ExtensionSettings.update_url = …/latest/updates.xml) and auto-updates
+# from it. The CRX must be signed with keys/kareenos-extension.pem so its id stays
+# the pinned one — a CRX with any other id installs NOTHING, silently, in every
+# VM, so the pem-derived id is asserted against the manifest-derived one.
+step "Packing the CRX for Cloud Browsers"
+PEM="$REPO_ROOT/keys/kareenos-extension.pem"
+CRX_NAME="kareenos-extension-latest.crx"
+UPDATES_XML="updates.xml"
+CHROME_BIN="${CHROME_BIN:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
+CRX_SRC=""
+if [[ -f "$PEM" ]]; then
+  PEM_ID="$(openssl rsa -in "$PEM" -pubout -outform DER 2>/dev/null | shasum -a 256 | cut -c1-32 | tr '0123456789abcdef' 'abcdefghijklmnop')"
+  [[ -z "$EXT_ID" || "$PEM_ID" == "$EXT_ID" ]] || die "keys/kareenos-extension.pem derives id $PEM_ID but the manifest key derives $EXT_ID — a CRX with the wrong id installs nothing in a Cloud Browser"
+  rm -f "$EXT_DIR/.output/chrome-mv3.crx"
+  if [[ -x "$CHROME_BIN" ]]; then
+    "$CHROME_BIN" --no-message-box --pack-extension="$EXT_DIR/.output/chrome-mv3" --pack-extension-key="$PEM" >/dev/null 2>&1 || true
+  fi
+  if [[ ! -s "$EXT_DIR/.output/chrome-mv3.crx" ]]; then
+    dim "Chrome binary not usable for --pack-extension; trying npx crx3"
+    (cd "$EXT_DIR" && npx --yes crx3 -p "$PEM" -o .output/chrome-mv3.crx .output/chrome-mv3) || die "could not pack a CRX (install Google Chrome, or the crx3 package)"
+  fi
+  [[ "$(head -c 4 "$EXT_DIR/.output/chrome-mv3.crx")" == "Cr24" ]] || die "packed file is not a CRX3"
+  CRX_SRC="$EXT_DIR/.output/chrome-mv3.crx"
+  cat > "$EXT_DIR/.output/$UPDATES_XML" <<XML
+<?xml version='1.0' encoding='UTF-8'?>
+<gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
+  <app appid='$EXT_ID'>
+    <updatecheck codebase='https://kareenos.com/$REL_SUBPATH/$CRX_NAME' version='$EXT_VERSION' />
+  </app>
+</gupdate>
+XML
+  ok "CRX3 packed ($(du -h "$CRX_SRC" | cut -f1)) + $UPDATES_XML for $EXT_ID v$EXT_VERSION"
+else
+  dim "keys/kareenos-extension.pem not present — no CRX this release (Cloud Browsers keep their current version)"
+fi
+
+# =============================================================================
 # 9. Publish — atomically, to all three destinations
 #
 # express.static serves destination 3 LIVE. A plain cp of a 10 MB file would hand
@@ -340,16 +380,24 @@ dim "sha256 $ZIP_SHA"
 # =============================================================================
 step "Publishing $ARTIFACT_NAME"
 
-publish_to() {
-  local dest_dir="$1" label="$2" tmp
+publish_file() {
+  local src="$1" name="$2" dest_dir="$3" tmp
   mkdir -p "$dest_dir"
-  tmp="$dest_dir/.${ARTIFACT_NAME}.tmp.$$"
+  tmp="$dest_dir/.${name}.tmp.$$"
   TMP_FILES+=("$tmp")
-  cp "$ZIP_SRC" "$tmp"
+  cp "$src" "$tmp"
   chmod 644 "$tmp"
-  mv -f "$tmp" "$dest_dir/$ARTIFACT_NAME"
+  mv -f "$tmp" "$dest_dir/$name"
+}
+publish_to() {
+  local dest_dir="$1" label="$2"
+  publish_file "$ZIP_SRC" "$ARTIFACT_NAME" "$dest_dir"
+  if [[ -n "$CRX_SRC" ]]; then
+    publish_file "$CRX_SRC" "$CRX_NAME" "$dest_dir"
+    publish_file "$EXT_DIR/.output/$UPDATES_XML" "$UPDATES_XML" "$dest_dir"
+  fi
   ok "$label"
-  dim "$dest_dir/$ARTIFACT_NAME"
+  dim "$dest_dir/$ARTIFACT_NAME${CRX_SRC:+ + $CRX_NAME + $UPDATES_XML}"
 }
 
 publish_to "$REPO_ROOT/$REL_SUBPATH"                        "repo release dir"

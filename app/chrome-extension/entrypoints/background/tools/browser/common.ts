@@ -1,8 +1,8 @@
 import { createErrorResponse, ToolResult } from '@/common/tool-handler';
 import {
   BaseBrowserToolExecutor,
-  BRING_WINDOW_TO_FRONT,
-  ACTIVATE_CHANNEL_TAB,
+  bringWindowToFront,
+  activateChannelTab,
   DEFAULT_LANE,
 } from '../base-browser';
 import { TOOL_NAMES } from 'chrome-mcp-shared';
@@ -163,11 +163,11 @@ class NavigateTool extends BaseBrowserToolExecutor {
         if (channelTab && typeof channelTab.id === 'number') {
           await chrome.tabs.update(channelTab.id, {
             url,
-            active: ACTIVATE_CHANNEL_TAB && background !== true,
+            active: activateChannelTab() && background !== true,
           });
           if (
             background !== true &&
-            BRING_WINDOW_TO_FRONT &&
+            bringWindowToFront() &&
             typeof channelTab.windowId === 'number'
           ) {
             await chrome.windows.update(channelTab.windowId, { focused: true });
@@ -208,7 +208,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
           url: url,
           width: typeof width === 'number' ? width : DEFAULT_WINDOW_WIDTH,
           height: typeof height === 'number' ? height : DEFAULT_WINDOW_HEIGHT,
-          focused: background !== true && BRING_WINDOW_TO_FRONT,
+          focused: background !== true && bringWindowToFront(),
         });
 
         if (newWindow && newWindow.id !== undefined) {
@@ -260,7 +260,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
           const newTab = await chrome.tabs.create({
             url: url,
             windowId: targetWindow.id,
-            active: ACTIVATE_CHANNEL_TAB && background !== true,
+            active: activateChannelTab() && background !== true,
           });
           if (background !== true && BRING_WINDOW_TO_FRONT) {
             await chrome.windows.update(targetWindow.id, { focused: true });
