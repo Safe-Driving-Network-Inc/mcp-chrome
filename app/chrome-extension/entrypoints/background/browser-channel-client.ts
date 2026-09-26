@@ -379,6 +379,35 @@ async function executeCommand(cmd: CommandEnvelope) {
 // SW eviction anyway — the server times out and tells the agent).
 const laneTails = new Map<string, Promise<void>>();
 
+// ---------------------------------------------------------------------------
+// Controlled updates (1.3.3). Left alone, Chrome swaps in a new extension version
+// whenever IT decides the worker is idle — on 2026-09-26 that happened between two
+// commands of a live run inside a Cloud Browser: the old worker died mid-command
+// (no close event, nothing on the wire) and the new one could not start. Listening
+// to runtime.onUpdateAvailable makes Chrome DEFER the update until we call
+// runtime.reload(); we do that only when no command is queued or running and the
+// last one finished more than UPDATE_IDLE_MS ago. The 30 s alarm re-checks, so an
+// idle extension picks a release up within ~75 s of Chrome fetching it.
+// ---------------------------------------------------------------------------
+const UPDATE_IDLE_MS = 45_000;
+let pendingUpdateVersion: string | null = null;
+let inFlightCommands = 0;
+let lastCommandDoneAt = 0;
+function maybeApplyUpdate(why: string) {
+  if (!pendingUpdateVersion) return;
+  const idleFor = Date.now() - lastCommandDoneAt;
+  if (inFlightCommands > 0 || idleFor < UPDATE_IDLE_MS) {
+    trace('update deferred', { v: pendingUpdateVersion, why, in_flight: inFlightCommands, idle_s: Math.round(idleFor / 1000) });
+    return;
+  }
+  trace('update applying', { v: pendingUpdateVersion, why });
+  try {
+    chrome.runtime.reload();
+  } catch (e: any) {
+    trace('update reload failed', { err: String((e && e.message) || e) });
+  }
+}
+
 function handleCommand(cmd: CommandEnvelope) {
   if (!cmd || !cmd.command_id) return;
   if (!isSupportedAction(cmd.action)) {
@@ -389,9 +418,12 @@ function handleCommand(cmd: CommandEnvelope) {
     return;
   }
   const laneId = cmd.lane_id || 'default';
+  inFlightCommands++;
   const tail = (laneTails.get(laneId) || Promise.resolve()).then(() => executeCommand(cmd));
   laneTails.set(laneId, tail);
   tail.finally(() => {
+    inFlightCommands = Math.max(0, inFlightCommands - 1);
+    lastCommandDoneAt = Date.now();
     if (laneTails.get(laneId) === tail) laneTails.delete(laneId);
   });
 }
@@ -1028,6 +1060,7 @@ export function initBrowserChannelClient() {
     chrome.alarms.onAlarm.addListener((alarm) => {
       if (alarm.name !== ALARM_NAME) return;
       if (!(current && current.bound)) trace('alarm', { state });
+      maybeApplyUpdate('alarm');
       nudge('alarm')();
     });
   } catch (e) {
@@ -1043,6 +1076,16 @@ export function initBrowserChannelClient() {
       } else {
         connect('startup');
       }
+    });
+  } catch (e) {
+    /* ignore */
+  }
+  // A new version was downloaded: Chrome now waits for OUR reload (see maybeApplyUpdate).
+  try {
+    chrome.runtime.onUpdateAvailable.addListener((d) => {
+      pendingUpdateVersion = (d && d.version) || 'unknown';
+      trace('update available', { v: pendingUpdateVersion });
+      maybeApplyUpdate('available');
     });
   } catch (e) {
     /* ignore */
