@@ -253,6 +253,14 @@ if [[ -n "$CHANNEL_ERRORS" ]]; then
   printf '%s\n' "$CHANNEL_ERRORS" >&2
   die "type errors in the Kareenos channel files (above) — the bundle would build and then fail at runtime"
 fi
+# 1.3.2: an identifier that does not exist ANYWHERE in the extension (TS2304 / TS2552 "Cannot find
+# name") is a guaranteed ReferenceError at runtime — 1.3.1 shipped one in the navigate handler
+# (BRING_WINDOW_TO_FRONT) and every browser_navigate failed while read/scroll worked.
+UNDEFINED_NAMES="$(printf '%s\n' "$TSC_OUT" | grep -E 'error TS(2304|2552)' || true)"
+if [[ -n "$UNDEFINED_NAMES" ]]; then
+  printf '%s\n' "$UNDEFINED_NAMES" >&2
+  die "undefined names in the extension (above) — each one is a ReferenceError at runtime"
+fi
 ok "channel files type-check clean ($(printf '%s\n' "$TSC_OUT" | grep -c 'error TS' || true) pre-existing errors elsewhere, ignored)"
 
 # =============================================================================

@@ -262,7 +262,9 @@ class NavigateTool extends BaseBrowserToolExecutor {
             windowId: targetWindow.id,
             active: activateChannelTab() && background !== true,
           });
-          if (background !== true && BRING_WINDOW_TO_FRONT) {
+          // 1.3.2: bringWindowToFront() (per channel kind), not the removed constant —
+          // the bare name threw ReferenceError on the FIRST navigate of every lane.
+          if (background !== true && bringWindowToFront()) {
             await chrome.windows.update(targetWindow.id, { focused: true });
           }
 
@@ -304,7 +306,7 @@ class NavigateTool extends BaseBrowserToolExecutor {
             url: url,
             width: DEFAULT_WINDOW_WIDTH,
             height: DEFAULT_WINDOW_HEIGHT,
-            focused: BRING_WINDOW_TO_FRONT,
+            focused: bringWindowToFront(),
           });
 
           if (fallbackWindow && fallbackWindow.id !== undefined) {
