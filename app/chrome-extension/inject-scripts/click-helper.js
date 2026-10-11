@@ -226,12 +226,20 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
         }
         if (!target || !(target instanceof Element)) {
           return {
-            error: { code: 'STALE_REF', message: `Element ref "${ref}" is not known in this frame — take a new browser_snapshot.`, details: { ref } },
+            error: {
+              code: 'STALE_REF',
+              message: `Element ref "${ref}" is not known in this frame — take a new browser_snapshot.`,
+              details: { ref },
+            },
           };
         }
         if (target.disabled || target.getAttribute('aria-disabled') === 'true') {
           return {
-            error: { code: 'DISABLED', message: `The element for ref "${ref}" is disabled — the page must enable it first.`, details: { ref } },
+            error: {
+              code: 'DISABLED',
+              message: `The element for ref "${ref}" is disabled — the page must enable it first.`,
+              details: { ref },
+            },
           };
         }
 
@@ -310,7 +318,11 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
         const candidates = __kResolveCandidates(selector);
         if (!candidates.length) {
           return {
-            error: { code: 'NOT_FOUND', message: `Element with selector "${selector}" not found in this frame`, details: { selector } },
+            error: {
+              code: 'NOT_FOUND',
+              message: `Element with selector "${selector}" not found in this frame`,
+              details: { selector },
+            },
           };
         }
 
@@ -551,7 +563,7 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
 
-    const elementAtPoint = document.elementFromPoint(centerX, centerY);
+    const elementAtPoint = deepElementFromPoint(centerX, centerY);
     if (!elementAtPoint) return false;
 
     // Accept the target itself, a DESCENDANT (we aimed at a wrapper and hit its
@@ -561,9 +573,31 @@ if (window.__CLICK_HELPER_INITIALIZED__) {
     // rejecting it made real, clickable controls read as "not visible".
     return (
       element === elementAtPoint ||
-      element.contains(elementAtPoint) ||
-      elementAtPoint.contains(element)
+      composedContains(element, elementAtPoint) ||
+      composedContains(elementAtPoint, element)
     );
+  }
+
+  // document.elementFromPoint stops at a shadow host and Node.contains does not
+  // cross shadow boundaries, so a control inside a shadow root (LinkedIn's
+  // #interop-outlet dialogs) lost pass 1 to any hidden light-DOM duplicate.
+  // Same pair as fill-helper.js.
+  function deepElementFromPoint(x, y) {
+    let el = document.elementFromPoint(x, y);
+    for (let guard = 0; el && el.shadowRoot && guard < 32; guard++) {
+      const inner = el.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    return el;
+  }
+
+  function composedContains(ancestor, node) {
+    for (let n = node, guard = 0; n && guard < 4096; guard++) {
+      if (n === ancestor) return true;
+      n = n.parentNode || (n.nodeType === 11 ? n.host : null);
+    }
+    return false;
   }
 
   // Listen for messages from the extension

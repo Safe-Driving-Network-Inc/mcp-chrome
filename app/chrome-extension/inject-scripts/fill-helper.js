@@ -74,7 +74,11 @@ if (window.__FILL_HELPER_INITIALIZED__) {
         }
         if (!element || !(element instanceof Element)) {
           return {
-            error: { code: 'STALE_REF', message: `Element ref "${ref}" is not known in this frame — take a new browser_snapshot.`, details: { ref } },
+            error: {
+              code: 'STALE_REF',
+              message: `Element ref "${ref}" is not known in this frame — take a new browser_snapshot.`,
+              details: { ref },
+            },
           };
         }
       } else if (selector) {
@@ -161,13 +165,21 @@ if (window.__FILL_HELPER_INITIALIZED__) {
       // Check if element is visible
       if (!elementInfo.isVisible) {
         return {
-          error: { code: 'NOT_VISIBLE', message: `Element ${ref || '"' + selector + '"'} is not visible (hidden, zero-size or covered)`, details: { selector: selector || null, ref: ref || null } },
+          error: {
+            code: 'NOT_VISIBLE',
+            message: `Element ${ref || '"' + selector + '"'} is not visible (hidden, zero-size or covered)`,
+            details: { selector: selector || null, ref: ref || null },
+          },
           elementInfo,
         };
       }
       if (element.disabled || element.getAttribute('aria-disabled') === 'true') {
         return {
-          error: { code: 'DISABLED', message: `Element ${ref || '"' + selector + '"'} is disabled — the page must enable it first`, details: { selector: selector || null, ref: ref || null } },
+          error: {
+            code: 'DISABLED',
+            message: `Element ${ref || '"' + selector + '"'} is disabled — the page must enable it first`,
+            details: { selector: selector || null, ref: ref || null },
+          },
           elementInfo,
         };
       }
@@ -226,19 +238,28 @@ if (window.__FILL_HELPER_INITIALIZED__) {
             }
             if (!validTags.includes(element.tagName)) {
               return {
-                error: { code: 'NOT_FILLABLE', message: `Element ${ref || '"' + selector + '"'} is not a fillable element (must be an input, textarea, select or a rich-text editor)` },
+                error: {
+                  code: 'NOT_FILLABLE',
+                  message: `Element ${ref || '"' + selector + '"'} is not a fillable element (must be an input, textarea, select or a rich-text editor)`,
+                },
                 elementInfo,
               };
             }
           } else {
             return {
-              error: { code: 'NOT_FILLABLE', message: `Element ${ref || '"' + selector + '"'} is not a fillable element (must be an input, textarea, select or a rich-text editor)` },
+              error: {
+                code: 'NOT_FILLABLE',
+                message: `Element ${ref || '"' + selector + '"'} is not a fillable element (must be an input, textarea, select or a rich-text editor)`,
+              },
               elementInfo,
             };
           }
         } catch (_) {
           return {
-            error: { code: 'NOT_FILLABLE', message: `Element ${ref || '"' + selector + '"'} is not a fillable element (must be an input, textarea, select or a rich-text editor)` },
+            error: {
+              code: 'NOT_FILLABLE',
+              message: `Element ${ref || '"' + selector + '"'} is not a fillable element (must be an input, textarea, select or a rich-text editor)`,
+            },
             elementInfo,
           };
         }
@@ -251,7 +272,10 @@ if (window.__FILL_HELPER_INITIALIZED__) {
         element.type !== null
       ) {
         return {
-          error: { code: 'NOT_FILLABLE', message: `Input ${ref || '"' + selector + '"'} has type "${element.type}" which is not fillable` },
+          error: {
+            code: 'NOT_FILLABLE',
+            message: `Input ${ref || '"' + selector + '"'} has type "${element.type}" which is not fillable`,
+          },
           elementInfo,
         };
       }
@@ -495,7 +519,7 @@ if (window.__FILL_HELPER_INITIALIZED__) {
     const centerX = rect.left + rect.width / 2;
     const centerY = rect.top + rect.height / 2;
 
-    const elementAtPoint = document.elementFromPoint(centerX, centerY);
+    const elementAtPoint = deepElementFromPoint(centerX, centerY);
     if (!elementAtPoint) return false;
 
     // Accept the target, a descendant, or an ANCESTOR at the point (a label span
@@ -503,9 +527,32 @@ if (window.__FILL_HELPER_INITIALIZED__) {
     // hashed-class sites; click-helper accepts the same).
     return (
       element === elementAtPoint ||
-      element.contains(elementAtPoint) ||
-      elementAtPoint.contains(element)
+      composedContains(element, elementAtPoint) ||
+      composedContains(elementAtPoint, element)
     );
+  }
+
+  // document.elementFromPoint stops at a shadow host, and Node.contains does not
+  // cross shadow boundaries — so every field inside a shadow root (LinkedIn's
+  // invitation dialog lives in #interop-outlet's shadow root) read as "not
+  // visible" and could never be filled. Descend through open roots at the point,
+  // and walk the composed tree (a closed root still reaches its host).
+  function deepElementFromPoint(x, y) {
+    let el = document.elementFromPoint(x, y);
+    for (let guard = 0; el && el.shadowRoot && guard < 32; guard++) {
+      const inner = el.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    return el;
+  }
+
+  function composedContains(ancestor, node) {
+    for (let n = node, guard = 0; n && guard < 4096; guard++) {
+      if (n === ancestor) return true;
+      n = n.parentNode || (n.nodeType === 11 ? n.host : null);
+    }
+    return false;
   }
 
   // Listen for messages from the extension
