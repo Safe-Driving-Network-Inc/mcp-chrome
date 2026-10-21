@@ -8,9 +8,10 @@ export { webFetcherTool } from './web-fetcher'; // chrome_get_web_content → pl
 export { clickTool, fillTool } from './interaction';
 export { scrollTool } from './scroll'; // chrome_scroll → platform "scroll" (reach virtual-list items)
 export { screenshotTool } from './screenshot';
-export { uploadFileTool } from './upload'; // chrome_upload_file → platform "upload" (bytes arrive base64; never fetched)
+export { uploadFileTool } from './upload'; // chrome_upload_file → platform "upload" (base64 inline, or the file's public Kareenos link downloaded in pieces)
 // v2 (2026-09-14): the ref-based engine.
 export { snapshotTool } from './snapshot'; // kareenos_snapshot → platform "snapshot" (refs the agent acts on)
 export { waitTool } from './wait'; // kareenos_wait → platform "wait" (text/selector/ref × visible/hidden, load state)
 export { pressTool } from './press'; // kareenos_press → platform "press" (trusted keys over CDP; gated like click)
 export { runStepsTool } from './run-steps'; // kareenos_run_steps → platform "run_steps" (batched steps, one round trip)
+export { laneCloseTool } from './lane-close'; // kareenos_lane_close → platform "lane_close" (the run released the browser: close its tab + popups)

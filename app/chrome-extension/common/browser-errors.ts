@@ -23,6 +23,7 @@ export type BrowserErrorCode =
   | 'NO_FRAME_ACCESS' // the frame cannot be scripted (chrome://, sandboxed, gone)
   | 'TIMEOUT' // the action / wait did not finish within its budget
   | 'NAV_INTERRUPTED' // the frame navigated while the action ran
+  | 'NAV_REQUIRED' // this lane has no tab yet (fresh browser / lane) — navigate first
   | 'UNSUPPORTED_ACTION'
   | 'EXECUTION_ERROR';
 
@@ -39,6 +40,7 @@ export const BROWSER_ERROR_CODES: readonly BrowserErrorCode[] = [
   'NO_FRAME_ACCESS',
   'TIMEOUT',
   'NAV_INTERRUPTED',
+  'NAV_REQUIRED',
   'UNSUPPORTED_ACTION',
   'EXECUTION_ERROR',
 ];
@@ -61,7 +63,12 @@ export class BrowserActionError extends Error {
 }
 
 export function isBrowserActionError(e: unknown): e is BrowserActionError {
-  return !!e && typeof e === 'object' && (e as any).name === 'BrowserActionError' && typeof (e as any).code === 'string';
+  return (
+    !!e &&
+    typeof e === 'object' &&
+    (e as any).name === 'BrowserActionError' &&
+    typeof (e as any).code === 'string'
+  );
 }
 
 // A helper reply of the shape { error: { code, message, details } } → error.
@@ -69,21 +76,56 @@ export function isBrowserActionError(e: unknown): e is BrowserActionError {
 export function errorFromResponse(response: any): BrowserActionError | null {
   const e = response && response.error;
   if (!e || typeof e !== 'object' || typeof e.code !== 'string') return null;
-  return new BrowserActionError(e.code, String(e.message || e.code), e.details && typeof e.details === 'object' ? e.details : undefined);
+  return new BrowserActionError(
+    e.code,
+    String(e.message || e.code),
+    e.details && typeof e.details === 'object' ? e.details : undefined,
+  );
 }
 
 // Wrap anything thrown on the tool path into a BrowserActionError, mapping the
 // Chrome messaging failures that have a precise meaning.
-export function toBrowserError(e: unknown, fallbackCode: BrowserErrorCode = 'EXECUTION_ERROR'): BrowserActionError {
+export function toBrowserError(
+  e: unknown,
+  fallbackCode: BrowserErrorCode = 'EXECUTION_ERROR',
+): BrowserActionError {
   if (isBrowserActionError(e)) return e;
   const msg = e instanceof Error ? e.message : String(e);
-  if (/message port closed before a response/i.test(msg)) {
-    return new BrowserActionError('NAV_INTERRUPTED', 'The frame navigated or unloaded while the action was running: ' + msg);
+  // Chrome's wording changed twice: "The message port closed before a response was
+  // received" (old), "A listener indicated an asynchronous response by returning
+  // true, but the message channel closed before a response was received" (current)
+  // and "Error message from listener couldn't be parsed or was empty" (the helper's
+  // reply was lost when its document unloaded). All three mean the same thing:
+  // the frame navigated or unloaded under the action — which, after Enter or a
+  // click, is what success looks like (2026-10-21).
+  if (
+    /message (port|channel) closed before a response|couldn't be parsed or was empty|could not be parsed or was empty/i.test(
+      msg,
+    )
+  ) {
+    return new BrowserActionError(
+      'NAV_INTERRUPTED',
+      'The frame navigated or unloaded while the action was running: ' + msg,
+    );
   }
   if (/Receiving end does not exist|Could not establish connection/i.test(msg)) {
-    return new BrowserActionError('NO_FRAME_ACCESS', 'The target frame could not be reached (it may have navigated, closed, or cannot run scripts): ' + msg);
+    return new BrowserActionError(
+      'NO_FRAME_ACCESS',
+      'The target frame could not be reached (it may have navigated, closed, or cannot run scripts): ' +
+        msg,
+    );
   }
-  if (/Cannot access (a )?chrome:\/\/|chrome-extension:\/\/|Cannot access contents of|Extensions cannot|The extensions gallery cannot be scripted/i.test(msg)) {
+  if (/No tab with id|The tab was closed|Tabs cannot be edited right now/i.test(msg)) {
+    return new BrowserActionError('NO_FRAME_ACCESS', "The lane's tab is gone or busy: " + msg);
+  }
+  if (/^No tab is open for this task yet/i.test(msg)) {
+    return new BrowserActionError('NAV_REQUIRED', msg);
+  }
+  if (
+    /Cannot access (a )?chrome:\/\/|chrome-extension:\/\/|Cannot access contents of|Extensions cannot|The extensions gallery cannot be scripted/i.test(
+      msg,
+    )
+  ) {
     return new BrowserActionError('NO_FRAME_ACCESS', msg);
   }
   return new BrowserActionError(fallbackCode, msg);
@@ -115,7 +157,11 @@ export function parseStructuredError(text: string): StructuredError | null {
     const parsed = JSON.parse(text);
     const k = parsed && parsed[KERROR_KEY];
     if (k && typeof k.code === 'string') {
-      return { code: k.code, message: String(k.message || k.code), details: k.details && typeof k.details === 'object' ? k.details : undefined };
+      return {
+        code: k.code,
+        message: String(k.message || k.code),
+        details: k.details && typeof k.details === 'object' ? k.details : undefined,
+      };
     }
   } catch (e) {
     /* not structured */

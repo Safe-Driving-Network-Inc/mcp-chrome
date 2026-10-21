@@ -10,6 +10,7 @@ export const KAREENOS_TOOL_NAMES = {
   WAIT: 'kareenos_wait',
   PRESS: 'kareenos_press',
   RUN_STEPS: 'kareenos_run_steps',
+  LANE_CLOSE: 'kareenos_lane_close', // platform "lane_close": the run let go of the browser — close its lane tab + popups (2026-10-21)
 } as const;
 
 // The in-page core every v2 action shares (inject-scripts/k-dom-core.js).

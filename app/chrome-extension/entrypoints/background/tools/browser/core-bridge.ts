@@ -20,6 +20,12 @@ export interface FrameInfo {
 }
 
 const PING_TIMEOUT_MS = 300;
+// Every message to a frame has a deadline (2026-10-21): a frame that hangs or is
+// unloading used to hold the tool — and the lane behind it — until the server
+// timed the command out. Waits the core performs itself (quiet windows, waits)
+// ride on top of the base so a legitimate long wait is not cut short.
+const CORE_CALL_BASE_TIMEOUT_MS = 8000;
+const INJECT_TIMEOUT_MS = 8000;
 
 export async function listFrames(tabId: number): Promise<FrameInfo[]> {
   try {
@@ -63,21 +69,51 @@ export async function ensureCore(tabId: number, frameId: number): Promise<void> 
     /* not injected yet (or the frame is gone — injection below tells us) */
   }
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId, frameIds: [frameId] },
-      files: [K_DOM_CORE_SCRIPT],
-      world: 'ISOLATED',
-    } as any);
+    await withTimeout(
+      chrome.scripting.executeScript({
+        target: { tabId, frameIds: [frameId] },
+        files: [K_DOM_CORE_SCRIPT],
+        world: 'ISOLATED',
+      } as any),
+      INJECT_TIMEOUT_MS,
+      `inject into frame f${frameId}`,
+    );
   } catch (e) {
+    if (e instanceof Error && /timed out$/.test(e.message)) {
+      throw new BrowserActionError(
+        'NO_FRAME_ACCESS',
+        `Frame f${frameId} did not accept the page helper within ${INJECT_TIMEOUT_MS} ms (hung or unloading frame)`,
+      );
+    }
     throw toBrowserError(e, 'NO_FRAME_ACCESS');
   }
 }
 
-export async function sendCore(tabId: number, frameId: number, message: Record<string, any>): Promise<any> {
+export async function sendCore(
+  tabId: number,
+  frameId: number,
+  message: Record<string, any>,
+): Promise<any> {
   let response: any;
+  const ownWait = Math.max(
+    0,
+    Number(message && (message.cap_ms || message.timeout || message.timeout_ms)) || 0,
+  );
+  const limitMs = CORE_CALL_BASE_TIMEOUT_MS + ownWait;
   try {
-    response = await chrome.tabs.sendMessage(tabId, message, { frameId });
+    response = await withTimeout(
+      chrome.tabs.sendMessage(tabId, message, { frameId }),
+      limitMs,
+      `frame f${frameId} ${message && message.action}`,
+    );
   } catch (e) {
+    if (e instanceof Error && /timed out$/.test(e.message)) {
+      throw new BrowserActionError(
+        'NO_FRAME_ACCESS',
+        `Frame f${frameId} did not answer ${message && message.action} within ${limitMs} ms (hung or unloading frame)`,
+        { frame: frameId, action: message && message.action, limit_ms: limitMs },
+      );
+    }
     throw toBrowserError(e);
   }
   const structured = errorFromResponse(response);
@@ -89,7 +125,11 @@ export async function sendCore(tabId: number, frameId: number, message: Record<s
 }
 
 // Convenience: ensure the core in a frame and send one message.
-export async function coreCall(tabId: number, frameId: number, message: Record<string, any>): Promise<any> {
+export async function coreCall(
+  tabId: number,
+  frameId: number,
+  message: Record<string, any>,
+): Promise<any> {
   await ensureCore(tabId, frameId);
   return sendCore(tabId, frameId, message);
 }
@@ -145,7 +185,11 @@ export function noteFrameEpoch(
   });
 }
 
-export async function expectedEpoch(laneId: string, tabId: number, frameId: number): Promise<string | undefined> {
+export async function expectedEpoch(
+  laneId: string,
+  tabId: number,
+  frameId: number,
+): Promise<string | undefined> {
   const book = await readRefBook(laneId);
   if (!book || book.tabId !== tabId) return undefined;
   return book.frames[String(frameId)]?.epoch;

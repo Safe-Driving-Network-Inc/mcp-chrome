@@ -282,6 +282,16 @@ fi
 # `wxt zip` defaults to production mode, which is what gates esbuild minification
 # and the COEP/COOP/CSP manifest keys — no NODE_ENV juggling needed.
 # =============================================================================
+# The manifest MUST carry update_url (2026-10-21). wxt.config.ts adds it only when
+# VITE_EXTENSION_UPDATE_URL is set, and the 1.3.5 release was built without it: a
+# Cloud Browser that force-installed that CRX never checked for updates again
+# (Chrome uses the MANIFEST url for later checks unless the policy sets
+# override_update_url) — 1.3.6 had to be pulled in by hand. Default the URL to
+# the live update endpoint and refuse a build whose manifest lacks it.
+: "${VITE_EXTENSION_UPDATE_URL:=https://kareenos.com/releases/chrome-extension/latest/updates.xml}"
+export VITE_EXTENSION_UPDATE_URL
+dim "update_url  $VITE_EXTENSION_UPDATE_URL"
+
 step "Building + packaging the extension (wxt zip)"
 
 # Retry once. wxt.config.ts registers viteStaticCopy with hook:'writeBundle', and
@@ -358,6 +368,10 @@ else
 fi
 ok "$ZIP_HUMAN ($ZIP_BYTES bytes)"
 dim "sha256 $ZIP_SHA"
+# Fail closed: a manifest without update_url ships a browser that can never update itself.
+MANIFEST_UPDATE_URL="$(unzip -p "$ZIP_SRC" manifest.json | node -pe "JSON.parse(require('fs').readFileSync(0,'utf8')).update_url || ''")"
+[[ -n "$MANIFEST_UPDATE_URL" ]] || die "the built manifest has no update_url — set VITE_EXTENSION_UPDATE_URL (see 2026-10-21 note above)"
+dim "manifest $MANIFEST_UPDATE_URL"
 
 # =============================================================================
 # 8b. CRX3 + update manifest — the Cloud Browser (K-Desktop) copy

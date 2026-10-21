@@ -35,17 +35,27 @@ function pushNav(tabId: number, ev: NavEvent) {
 
 // Registered at module load: this module is imported on every SW spin-up.
 try {
-  chrome.webNavigation.onBeforeNavigate.addListener((d) => pushNav(d.tabId, { t: Date.now(), frameId: d.frameId, url: d.url, event: 'before' }));
-  chrome.webNavigation.onCommitted.addListener((d) => pushNav(d.tabId, { t: Date.now(), frameId: d.frameId, url: d.url, event: 'committed' }));
-  chrome.webNavigation.onDOMContentLoaded.addListener((d) => pushNav(d.tabId, { t: Date.now(), frameId: d.frameId, url: d.url, event: 'dom' }));
-  chrome.webNavigation.onCompleted.addListener((d) => pushNav(d.tabId, { t: Date.now(), frameId: d.frameId, url: d.url, event: 'completed' }));
+  chrome.webNavigation.onBeforeNavigate.addListener((d) =>
+    pushNav(d.tabId, { t: Date.now(), frameId: d.frameId, url: d.url, event: 'before' }),
+  );
+  chrome.webNavigation.onCommitted.addListener((d) =>
+    pushNav(d.tabId, { t: Date.now(), frameId: d.frameId, url: d.url, event: 'committed' }),
+  );
+  chrome.webNavigation.onDOMContentLoaded.addListener((d) =>
+    pushNav(d.tabId, { t: Date.now(), frameId: d.frameId, url: d.url, event: 'dom' }),
+  );
+  chrome.webNavigation.onCompleted.addListener((d) =>
+    pushNav(d.tabId, { t: Date.now(), frameId: d.frameId, url: d.url, event: 'completed' }),
+  );
 } catch (e) {
   /* webNavigation unavailable in some contexts */
 }
 try {
   chrome.tabs.onUpdated.addListener((tabId, info) => {
-    if (info.status === 'loading') pushNav(tabId, { t: Date.now(), frameId: 0, url: info.url || '', event: 'tab_loading' });
-    else if (info.status === 'complete') pushNav(tabId, { t: Date.now(), frameId: 0, url: info.url || '', event: 'tab_complete' });
+    if (info.status === 'loading')
+      pushNav(tabId, { t: Date.now(), frameId: 0, url: info.url || '', event: 'tab_loading' });
+    else if (info.status === 'complete')
+      pushNav(tabId, { t: Date.now(), frameId: 0, url: info.url || '', event: 'tab_complete' });
   });
 } catch (e) {
   /* ignore */
@@ -67,17 +77,26 @@ export function __pushNavEventForTests(tabId: number, ev: NavEvent) {
 
 export type LoadState = 'domcontentloaded' | 'complete';
 
-export async function waitForLoadState(tabId: number, state: LoadState, timeoutMs: number): Promise<{ ok: boolean; took_ms: number; status: string }> {
+export async function waitForLoadState(
+  tabId: number,
+  state: LoadState,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; took_ms: number; status: string }> {
   const start = Date.now();
   const deadline = start + Math.max(0, timeoutMs);
   let status = 'unknown';
   for (;;) {
+    if (signal && signal.aborted)
+      return { ok: false, took_ms: Date.now() - start, status: 'aborted' };
     try {
       const tab = await chrome.tabs.get(tabId);
       status = tab.status || 'unknown';
       if (status === 'complete') return { ok: true, took_ms: Date.now() - start, status };
       if (state === 'domcontentloaded') {
-        const dom = navEventsSince(tabId, start - 5000).some((e) => e.frameId === 0 && (e.event === 'dom' || e.event === 'completed'));
+        const dom = navEventsSince(tabId, start - 5000).some(
+          (e) => e.frameId === 0 && (e.event === 'dom' || e.event === 'completed'),
+        );
         if (dom) return { ok: true, took_ms: Date.now() - start, status };
       }
     } catch (e) {
@@ -145,7 +164,13 @@ function dialogKeys(probes: FrameProbe[]): Map<string, SettleRef & { modal: bool
   const m = new Map<string, SettleRef & { modal: boolean }>();
   probes.forEach((p) => {
     p.dialogs.forEach((d) => {
-      m.set(`${p.frame.frameId}:${d.name}`, { ref: formatRef(p.frame.frameId, d.ref), role: 'dialog', name: d.name, frame: p.frame.frameId, modal: !!d.modal });
+      m.set(`${p.frame.frameId}:${d.name}`, {
+        ref: formatRef(p.frame.frameId, d.ref),
+        role: 'dialog',
+        name: d.name,
+        frame: p.frame.frameId,
+        modal: !!d.modal,
+      });
     });
   });
   return m;
@@ -159,7 +184,13 @@ function focusOwner(probes: FrameProbe[]): (SettleRef & { editable: boolean }) |
   probes.forEach((p) => {
     const f = p.focus;
     if (!f || f.is_iframe) return;
-    const cand = { ref: formatRef(p.frame.frameId, f.ref), role: f.role, name: f.name, frame: p.frame.frameId, editable: !!f.editable };
+    const cand = {
+      ref: formatRef(p.frame.frameId, f.ref),
+      role: f.role,
+      name: f.name,
+      frame: p.frame.frameId,
+      editable: !!f.editable,
+    };
     if (!best || p.frame.frameId > best.frame) best = cand;
   });
   return best;
@@ -171,10 +202,20 @@ function focusKey(f: (SettleRef & { editable: boolean }) | null): string {
 
 // After a navigation there is no meaningful "before": report the landed page —
 // quiet window, open dialogs, focus — with navigated:true.
-export async function postNavigationSettle(tabId: number, laneId: string, opts?: { quietMs?: number; capMs?: number }): Promise<SettleReport> {
+export async function postNavigationSettle(
+  tabId: number,
+  laneId: string,
+  opts?: { quietMs?: number; capMs?: number },
+): Promise<SettleReport> {
   const frames = await listFrames(tabId);
   const quiet = await Promise.allSettled(
-    frames.map((f) => coreCall(tabId, f.frameId, { action: K_MSG.QUIET_WAIT, quiet_ms: opts?.quietMs ?? 300, cap_ms: opts?.capMs ?? 2000 })),
+    frames.map((f) =>
+      coreCall(tabId, f.frameId, {
+        action: K_MSG.QUIET_WAIT,
+        quiet_ms: opts?.quietMs ?? 300,
+        cap_ms: opts?.capMs ?? 2000,
+      }),
+    ),
   );
   let mutations = 0;
   let quietWaited = 0;
@@ -214,9 +255,13 @@ export interface SettleOptions {
   quietMs?: number; // mutation-quiet window (default 300)
   capMs?: number; // max time to wait for quiet (default 3000)
   budgetMs?: number; // overall time left for the whole action (caps everything)
+  signal?: AbortSignal; // the command's deadline passed: stop waiting, report what is known (2026-10-21)
 }
 
-export async function withSettle<T>(opts: SettleOptions, action: () => Promise<T>): Promise<{ result: T; settle: SettleReport }> {
+export async function withSettle<T>(
+  opts: SettleOptions,
+  action: () => Promise<T>,
+): Promise<{ result: T; settle: SettleReport }> {
   const quietMs = Math.max(50, opts.quietMs ?? 300);
   const started = Date.now();
   const budget = opts.budgetMs && opts.budgetMs > 0 ? opts.budgetMs : 0;
@@ -230,10 +275,19 @@ export async function withSettle<T>(opts: SettleOptions, action: () => Promise<T
 
   // Quiet window in every frame that is still alive (a navigated frame simply
   // fails the message — that is the navigation signal, not an error).
-  const capMs = Math.min(opts.capMs ?? 3000, budget ? Math.max(200, remaining() - 300) : opts.capMs ?? 3000);
+  const capMs = Math.min(
+    opts.capMs ?? 3000,
+    budget ? Math.max(200, remaining() - 300) : (opts.capMs ?? 3000),
+  );
   const framesNow = await listFrames(opts.tabId);
   const quiet = await Promise.allSettled(
-    framesNow.map((f) => coreCall(opts.tabId, f.frameId, { action: K_MSG.QUIET_WAIT, quiet_ms: quietMs, cap_ms: capMs })),
+    framesNow.map((f) =>
+      coreCall(opts.tabId, f.frameId, {
+        action: K_MSG.QUIET_WAIT,
+        quiet_ms: quietMs,
+        cap_ms: capMs,
+      }),
+    ),
   );
   let mutations = 0;
   let quietWaited = 0;
@@ -246,9 +300,16 @@ export async function withSettle<T>(opts: SettleOptions, action: () => Promise<T
   });
 
   const nav = navEventsSince(opts.tabId, t0);
-  const topCommitted = nav.some((e) => e.frameId === 0 && (e.event === 'committed' || e.event === 'tab_loading'));
-  if (topCommitted) {
-    await waitForLoadState(opts.tabId, 'complete', Math.min(15000, budget ? remaining() - 200 : 15000));
+  const topCommitted = nav.some(
+    (e) => e.frameId === 0 && (e.event === 'committed' || e.event === 'tab_loading'),
+  );
+  if (topCommitted && !(opts.signal && opts.signal.aborted)) {
+    await waitForLoadState(
+      opts.tabId,
+      'complete',
+      Math.min(15000, budget ? remaining() - 200 : 15000),
+      opts.signal,
+    );
   }
 
   const after = await probeAll(opts.tabId, opts.laneId);

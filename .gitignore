@@ -51,3 +51,6 @@ CLAUDE.md
 
 .docs/
 .claude/
+# local backup copies made before a change (repo convention: .bak-<date>-<topic>) — never committed
+*.bak
+*.bak-*

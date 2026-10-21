@@ -53,13 +53,24 @@ import {
   resolveToolCall,
   toResultEnvelope,
   failureEnvelope,
+  withTiming,
+  ACTION_DEFAULT_MS,
+  TIMEOUT_MARGIN_MS,
   type CommandEnvelope,
+  type ResultTiming,
 } from '@/common/browser-channel-adapter';
+import { sweepOrphanTabs } from './tools/base-browser';
 // 1.3.0 shipped WITHOUT this import: the bundle called getManagedBootstrap /
 // setChannelMode / isHosted as globals, connect() threw ReferenceError before
 // ever opening the socket, and the popup's state query never answered. The
 // build does not type-check (esbuild), so the release script now does (1.3.1).
-import { getManagedBootstrap, setChannelMode, isHosted, getChannelMode, lastManagedRead } from './channel-mode';
+import {
+  getManagedBootstrap,
+  setChannelMode,
+  isHosted,
+  getChannelMode,
+  lastManagedRead,
+} from './channel-mode';
 import { trace, getTrail, primeTrail } from './channel-trail';
 
 const ALARM_NAME = 'kareenos-browser-channel-heartbeat';
@@ -100,7 +111,13 @@ const CLOSE_SIGNED_OUT = 4000;
 const CLOSE_SUPERSEDED = 4001;
 const CLOSE_REVOKED = 4003;
 
-export type ConnState = 'signed_out' | 'disconnected' | 'connecting' | 'bound' | 'superseded' | 'waiting_bootstrap';
+export type ConnState =
+  | 'signed_out'
+  | 'disconnected'
+  | 'connecting'
+  | 'bound'
+  | 'superseded'
+  | 'waiting_bootstrap';
 
 interface ChannelRecord {
   token: string;
@@ -135,7 +152,11 @@ let channelLoadInFlight: Promise<ChannelRecord | null> | null = null;
 let channelLoadError: string | null = null; // last storage READ failure (not "no token")
 
 function setState(s: ConnState) {
-  if (s !== state) trace('state ' + state + ' -> ' + s, lastError && s !== 'bound' ? { err: lastError } : undefined);
+  if (s !== state)
+    trace(
+      'state ' + state + ' -> ' + s,
+      lastError && s !== 'bound' ? { err: lastError } : undefined,
+    );
   state = s;
   // Surface to the popup / welcome page (best effort).
   try {
@@ -295,6 +316,41 @@ function send(obj: any) {
   }
 }
 
+// Results that could not leave (socket closed mid-command) wait here and are
+// replayed after the next bind (2026-10-21). The server has already failed the
+// command as CHANNEL_OFFLINE for the agent; the replay puts the real outcome on
+// the audit trail. Bounded: 20 frames, 90 s.
+const RESULT_OUTBOX_MAX = 20;
+const RESULT_OUTBOX_TTL_MS = 90_000;
+const resultOutbox: Array<{ at: number; frame: any }> = [];
+function sendResult(frame: any) {
+  const ws = current?.ws;
+  if (ws && ws.readyState === WebSocket.OPEN && current?.bound) {
+    try {
+      ws.send(JSON.stringify(frame));
+      return true;
+    } catch (e) {
+      /* fall through to the outbox */
+    }
+  }
+  resultOutbox.push({ at: Date.now(), frame });
+  while (resultOutbox.length > RESULT_OUTBOX_MAX) resultOutbox.shift();
+  trace('result buffered (socket down)', {
+    command: frame && frame.command_id,
+    queued: resultOutbox.length,
+  });
+  return false;
+}
+function flushResultOutbox() {
+  if (!resultOutbox.length) return;
+  const now = Date.now();
+  const frames = resultOutbox
+    .splice(0, resultOutbox.length)
+    .filter((e) => now - e.at <= RESULT_OUTBOX_TTL_MS);
+  frames.forEach((e) => send({ ...e.frame, replayed: true, replayed_after_ms: now - e.at }));
+  if (frames.length) trace('results replayed after reconnect', { n: frames.length });
+}
+
 // Upstream frames that are NOT command results (today: Learn Mode's
 // 'macro_recorded'). Unlike send(), reports whether the frame actually left —
 // callers keep their payload queued (outbox) when the socket isn't bound yet.
@@ -312,24 +368,85 @@ export function sendUpstreamFrame(obj: any): boolean {
 // ---------------------------------------------------------------------------
 // Command execution (unchanged semantics)
 // ---------------------------------------------------------------------------
-// A tool that overruns its budget is answered with TIMEOUT right away (the
-// server's await would expire anyway) but the lane still waits for it to finish
-// (capped) before the next command, so a runaway action can never interleave
-// with the command that follows it.
-const OVERRUN_WAIT_CAP_MS = 60_000;
+// Deadlines (2026-10-21). Every command carries its server window (timeout_ms);
+// the deadline is received_at + window. A command whose lane only reaches it
+// after the deadline (minus a margin) is NOT executed — the server has already
+// answered TIMEOUT, and a click or keystroke that fires late double-posts — it
+// is answered TIMEOUT with not_started:true (safe to retry). A tool that overruns
+// its budget is told to stop (AbortSignal: settle/wait loops end at once), is
+// answered TIMEOUT, and the lane waits only a short grace for it, no longer the
+// old 60 s during which every command behind it died in the queue.
+const STALE_MARGIN_MS = 1500;
+const OVERRUN_WAIT_CAP_MS = 3_000;
 
-async function executeCommand(cmd: CommandEnvelope) {
+interface CommandMeta {
+  received_at: number;
+  deadline_at: number;
+  queue_position: number;
+}
+
+async function executeCommand(cmd: CommandEnvelope, meta: CommandMeta) {
   const startedAt = Date.now();
+  const timing: ResultTiming = {
+    received_at: meta.received_at,
+    started_at: startedAt,
+    queued_ms: Math.max(0, startedAt - meta.received_at),
+    queue_position: meta.queue_position,
+  };
+  if (startedAt > meta.deadline_at - STALE_MARGIN_MS) {
+    console.warn(
+      `[BC] stale ${cmd.command_id} action=${cmd.action}: waited ${timing.queued_ms}ms in lane ${cmd.lane_id || 'default'}, window closed — not executed`,
+    );
+    sendResult({
+      type: 'result',
+      ...withTiming(
+        failureEnvelope(
+          cmd,
+          'TIMEOUT',
+          `The ${cmd.action} action waited ${timing.queued_ms} ms in its lane behind an earlier command and its window had passed before it could start; it did NOT run. Retry it now that the lane is free.`,
+          {
+            not_started: true,
+            action: cmd.action,
+            queued_ms: timing.queued_ms,
+          },
+        ),
+        timing,
+      ),
+    });
+    return;
+  }
+  send({
+    type: 'ack',
+    command_id: cmd.command_id,
+    phase: 'started',
+    at: startedAt,
+    queue_position: 0,
+  });
   let call: { name: string; args: Record<string, any> };
   try {
     call = resolveToolCall(cmd);
   } catch (e: any) {
-    send({ type: 'result', ...failureEnvelope(cmd, 'EXECUTION_ERROR', (e && e.message) || 'Could not resolve the action') });
+    sendResult({
+      type: 'result',
+      ...withTiming(
+        failureEnvelope(cmd, 'EXECUTION_ERROR', (e && e.message) || 'Could not resolve the action'),
+        timing,
+      ),
+    });
     return;
   }
-  const budget = Number(call.args.timeoutMs) || 15_000;
+  // The budget is what is left of the window from NOW, never more than the
+  // action's own budget: a command that waited in its lane gets less, not a
+  // window that ends after the server stopped listening.
+  const remaining = meta.deadline_at - startedAt - TIMEOUT_MARGIN_MS;
+  const budget = Math.max(1000, Math.min(Number(call.args.timeoutMs) || 15_000, remaining));
+  call.args.timeoutMs = budget;
+  const abort = new AbortController();
+  call.args.signal = abort.signal;
+  call.args.deadlineAt = meta.deadline_at;
+  timing.budget_ms = budget;
   console.log(
-    `[BC] cmd ${cmd.command_id} lane=${cmd.lane_id || 'default'} action=${cmd.action} timeout_ms=${cmd.timeout_ms ?? 'n/a'} budget_ms=${budget}`,
+    `[BC] cmd ${cmd.command_id} lane=${cmd.lane_id || 'default'} action=${cmd.action} timeout_ms=${cmd.timeout_ms ?? 'n/a'} budget_ms=${budget} queued_ms=${timing.queued_ms}`,
   );
   let timer: ReturnType<typeof setTimeout> | null = null;
   let timedOut = false;
@@ -342,29 +459,53 @@ async function executeCommand(cmd: CommandEnvelope) {
   });
   try {
     const toolResult = await Promise.race([run, guard]);
-    const envelope = toResultEnvelope(cmd.action, cmd, toolResult as any);
+    const envelope = withTiming(toResultEnvelope(cmd.action, cmd, toolResult as any), timing);
     console.log(
       `[BC] result ${cmd.command_id} status=${envelope.status}` +
-        (envelope.status === 'failed' ? ` code=${envelope.errors[0] ? envelope.errors[0].code : 'n/a'}` : '') +
-        ` took=${Date.now() - startedAt}ms`,
+        (envelope.status === 'failed'
+          ? ` code=${envelope.errors[0] ? envelope.errors[0].code : 'n/a'}`
+          : '') +
+        ` took=${Date.now() - startedAt}ms queued=${timing.queued_ms}ms`,
     );
-    send({ type: 'result', ...envelope });
+    sendResult({ type: 'result', ...envelope });
   } catch (e: any) {
     if (timedOut) {
-      console.warn(`[BC] timeout ${cmd.command_id} after ${Date.now() - startedAt}ms (tool still running)`);
-      send({
+      console.warn(
+        `[BC] timeout ${cmd.command_id} after ${Date.now() - startedAt}ms (tool told to stop)`,
+      );
+      try {
+        abort.abort();
+      } catch (err) {
+        /* ignore */
+      }
+      sendResult({
         type: 'result',
-        ...failureEnvelope(cmd, 'TIMEOUT', `The ${cmd.action} action did not finish within ${budget} ms in the browser.`, {
-          budget_ms: budget,
-          action: cmd.action,
-        }),
+        ...withTiming(
+          failureEnvelope(
+            cmd,
+            'TIMEOUT',
+            `The ${cmd.action} action did not finish within ${budget} ms in the browser. It was dispatched to the page and may have taken effect; check the page before repeating it.`,
+            {
+              budget_ms: budget,
+              action: cmd.action,
+              started: true,
+            },
+          ),
+          timing,
+        ),
       });
-      // keep the lane serialized: let the overrunning tool finish (capped)
-      await Promise.race([run.catch(() => undefined), new Promise((r) => setTimeout(r, OVERRUN_WAIT_CAP_MS))]);
+      // Short grace for the stopped tool to settle, then the lane moves on.
+      await Promise.race([
+        run.catch(() => undefined),
+        new Promise((r) => setTimeout(r, OVERRUN_WAIT_CAP_MS)),
+      ]);
     } else {
-      send({
+      sendResult({
         type: 'result',
-        ...failureEnvelope(cmd, 'EXECUTION_ERROR', (e && e.message) || 'Tool execution failed'),
+        ...withTiming(
+          failureEnvelope(cmd, 'EXECUTION_ERROR', (e && e.message) || 'Tool execution failed'),
+          timing,
+        ),
       });
     }
   } finally {
@@ -397,7 +538,12 @@ function maybeApplyUpdate(why: string) {
   if (!pendingUpdateVersion) return;
   const idleFor = Date.now() - lastCommandDoneAt;
   if (inFlightCommands > 0 || idleFor < UPDATE_IDLE_MS) {
-    trace('update deferred', { v: pendingUpdateVersion, why, in_flight: inFlightCommands, idle_s: Math.round(idleFor / 1000) });
+    trace('update deferred', {
+      v: pendingUpdateVersion,
+      why,
+      in_flight: inFlightCommands,
+      idle_s: Math.round(idleFor / 1000),
+    });
     return;
   }
   trace('update applying', { v: pendingUpdateVersion, why });
@@ -407,6 +553,9 @@ function maybeApplyUpdate(why: string) {
     trace('update reload failed', { err: String((e && e.message) || e) });
   }
 }
+
+// Commands queued or running per lane (for the 'received' ack's queue_position).
+const laneDepth = new Map<string, number>();
 
 function handleCommand(cmd: CommandEnvelope) {
   if (!cmd || !cmd.command_id) return;
@@ -418,12 +567,33 @@ function handleCommand(cmd: CommandEnvelope) {
     return;
   }
   const laneId = cmd.lane_id || 'default';
+  const receivedAt = Date.now();
+  const window =
+    typeof cmd.timeout_ms === 'number' && cmd.timeout_ms > 0
+      ? cmd.timeout_ms
+      : ACTION_DEFAULT_MS[cmd.action] || 15_000;
+  const meta: CommandMeta = {
+    received_at: receivedAt,
+    deadline_at: receivedAt + window,
+    queue_position: laneDepth.get(laneId) || 0,
+  };
+  laneDepth.set(laneId, meta.queue_position + 1);
+  // Receipt goes back at once: the server knows the frame arrived and how many
+  // commands sit ahead of it in this lane.
+  send({
+    type: 'ack',
+    command_id: cmd.command_id,
+    phase: 'received',
+    at: receivedAt,
+    queue_position: meta.queue_position,
+  });
   inFlightCommands++;
-  const tail = (laneTails.get(laneId) || Promise.resolve()).then(() => executeCommand(cmd));
+  const tail = (laneTails.get(laneId) || Promise.resolve()).then(() => executeCommand(cmd, meta));
   laneTails.set(laneId, tail);
   tail.finally(() => {
     inFlightCommands = Math.max(0, inFlightCommands - 1);
     lastCommandDoneAt = Date.now();
+    laneDepth.set(laneId, Math.max(0, (laneDepth.get(laneId) || 1) - 1));
     if (laneTails.get(laneId) === tail) laneTails.delete(laneId);
   });
 }
@@ -545,7 +715,12 @@ function tickBootstrapWatch() {
   const delay = WATCH_SCHEDULE_S[watchIdx++] * 1000;
   watchTimer = setTimeout(async () => {
     watchTimer = null;
-    if (current && (current.bound || current.ws.readyState === WebSocket.CONNECTING || current.ws.readyState === WebSocket.OPEN)) {
+    if (
+      current &&
+      (current.bound ||
+        current.ws.readyState === WebSocket.CONNECTING ||
+        current.ws.readyState === WebSocket.OPEN)
+    ) {
       trace('watch stop: socket live', { bound: current.bound });
       return;
     }
@@ -647,7 +822,13 @@ function handleBindAck(c: Conn, frame: any, boot: any) {
     clearTimeout(c.connectTimer);
     c.connectTimer = null;
   }
-  trace('bind_ack', { ok: !!frame.ok, reason: frame.ok ? undefined : String(frame.reason || 'UNKNOWN'), kind: frame.kind || null, vm: frame.vm_id || null, token: !!frame.token });
+  trace('bind_ack', {
+    ok: !!frame.ok,
+    reason: frame.ok ? undefined : String(frame.reason || 'UNKNOWN'),
+    kind: frame.kind || null,
+    vm: frame.vm_id || null,
+    token: !!frame.token,
+  });
   if (frame.ok) {
     // Sliding renewal — persist BEFORE declaring bound; a persist failure keeps
     // the old (still valid) token in memory. In hosted mode the first ack turns
@@ -673,22 +854,23 @@ function handleBindAck(c: Conn, frame: any, boot: any) {
       }
     }
     const done = persistRenewal(frame);
-    done.catch(() => {}).then(() => {
-      if (current !== c) return;
-      c.bound = true;
-      boundSince = Date.now();
-      backoffMs = BACKOFF_MIN_MS;
-      lastError = null;
-      stopBootstrapWatch();
-      setState('bound');
-      startPing(c);
-      maybeRequestRenewal(c);
-      // We are live: flush any Learn Mode macros recorded while offline.
-      // Dynamic import — learn-mode statically imports this module.
-      import('./learn-mode')
-        .then((m) => m.drainMacroOutbox())
-        .catch(() => {});
-    });
+    done
+      .catch(() => {})
+      .then(() => {
+        if (current !== c) return;
+        c.bound = true;
+        boundSince = Date.now();
+        backoffMs = BACKOFF_MIN_MS;
+        lastError = null;
+        stopBootstrapWatch();
+        setState('bound');
+        startPing(c);
+        maybeRequestRenewal(c);
+        flushResultOutbox();
+        // We are live: flush any Learn Mode macros recorded while offline.
+        // Dynamic import — learn-mode statically imports this module.
+        import('./learn-mode').then((m) => m.drainMacroOutbox()).catch(() => {});
+      });
     return;
   }
   const reason = String(frame.reason || 'UNKNOWN');
@@ -699,7 +881,10 @@ function handleBindAck(c: Conn, frame: any, boot: any) {
     // refused bootstrap waits for the runtime's next policy write; VM_MISMATCH /
     // TRY_LATER / maintenance retry with backoff.
     if (reason === 'BOOTSTRAP_REPLAYED' || TERMINAL_REASONS.has(reason)) {
-      if (boot) chrome.storage.local.set({ [BOOTSTRAP_USED_KEY]: { issued_at: boot.issued_at || 0, at: Date.now() } }).catch(() => {});
+      if (boot)
+        chrome.storage.local
+          .set({ [BOOTSTRAP_USED_KEY]: { issued_at: boot.issued_at || 0, at: Date.now() } })
+          .catch(() => {});
       if (TERMINAL_REASONS.has(reason)) clearSignIn().catch(() => {});
       setState('waiting_bootstrap');
       return;
@@ -762,7 +947,8 @@ async function connect(_why?: string): Promise<void> {
     cancelReconnect();
     trace('connect', { why: _why, state });
     const rec = await withTimeout(getChannel(), 4000, 'token read', null as ChannelRecord | null);
-    if (rec === null && channelCache === undefined && !channelLoadError) channelLoadError = 'token read timed out';
+    if (rec === null && channelCache === undefined && !channelLoadError)
+      channelLoadError = 'token read timed out';
     // Hosted kind: the K-Desktop runtime bootstraps us through managed storage.
     // Precedence: our stored durable token for the SAME vm → an unspent
     // bootstrap token → wait for the runtime to write a fresh one.
@@ -787,8 +973,19 @@ async function connect(_why?: string): Promise<void> {
       bindKind = 'hosted';
       bindVm = boot.vm_id || null;
       const nowSec = Math.floor(Date.now() / 1000);
-      const durableOk = !!(rec && rec.token && rec.kind === 'hosted' && rec.vm_id === boot.vm_id && (!rec.exp || rec.exp > nowSec + 60));
-      const usedAt = await withTimeout(bootstrapUsedAt(), 3000, 'bootstrap-used read', null as number | null);
+      const durableOk = !!(
+        rec &&
+        rec.token &&
+        rec.kind === 'hosted' &&
+        rec.vm_id === boot.vm_id &&
+        (!rec.exp || rec.exp > nowSec + 60)
+      );
+      const usedAt = await withTimeout(
+        bootstrapUsedAt(),
+        3000,
+        'bootstrap-used read',
+        null as number | null,
+      );
       if (durableOk) {
         bindToken = rec!.token;
         trace('hosted: durable token', { vm: boot.vm_id || null });
@@ -798,7 +995,11 @@ async function connect(_why?: string): Promise<void> {
         trace('hosted: bootstrap token', { vm: boot.vm_id || null, issued: boot.issued_at || 0 });
       } else {
         bindToken = null;
-        trace('hosted: nothing usable', { boot_tok: !!boot.token, used_at: usedAt, issued: boot.issued_at || 0 });
+        trace('hosted: nothing usable', {
+          boot_tok: !!boot.token,
+          used_at: usedAt,
+          issued: boot.issued_at || 0,
+        });
       }
       if (!bindToken) {
         // Nothing usable: the runtime rewrites the policy on the next start/resume
@@ -810,7 +1011,10 @@ async function connect(_why?: string): Promise<void> {
     } else {
       setChannelMode('attended');
     }
-    const url = boot && boot.ws_url ? boot.ws_url : await withTimeout(getServerUrl(), 3000, 'server url read', DEFAULT_SERVER_URL);
+    const url =
+      boot && boot.ws_url
+        ? boot.ws_url
+        : await withTimeout(getServerUrl(), 3000, 'server url read', DEFAULT_SERVER_URL);
     if (!bindToken || !url) {
       if (channelCache === undefined && channelLoadError) {
         // Storage could not be read — we do not KNOW there is no token. Stay
@@ -880,9 +1084,7 @@ async function connect(_why?: string): Promise<void> {
           break;
         case 'macro_ack':
           // Server verdict for a Learn Mode macro: dequeue + notify the popup.
-          import('./learn-mode')
-            .then((m) => m.handleMacroAck(frame))
-            .catch(() => {});
+          import('./learn-mode').then((m) => m.handleMacroAck(frame)).catch(() => {});
           break;
         case 'pong':
           if (c.pongDeadline) {
@@ -1062,6 +1264,9 @@ export function initBrowserChannelClient() {
       if (!(current && current.bound)) trace('alarm', { state });
       maybeApplyUpdate('alarm');
       nudge('alarm')();
+      // Cloud Browser only: close tabs no lane owns any more (never the user's own
+      // tabs in an attended Chrome). Throttled inside to once a minute.
+      if (isHosted() && current && current.bound) sweepOrphanTabs().catch(() => {});
     });
   } catch (e) {
     /* alarms unavailable in some contexts */
@@ -1186,7 +1391,12 @@ export function initBrowserChannelClient() {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'managed' || !changes || !changes.kareenos_bootstrap) return;
       const nv = changes.kareenos_bootstrap.newValue;
-      trace('managed changed', { has_new: !!nv, vm: (nv && nv.vm_id) || null, tok: !!(nv && nv.token), bound: !!(current && current.bound) });
+      trace('managed changed', {
+        has_new: !!nv,
+        vm: (nv && nv.vm_id) || null,
+        tok: !!(nv && nv.token),
+        bound: !!(current && current.bound),
+      });
       if (current && current.bound) return;
       cancelReconnect();
       backoffMs = BACKOFF_MIN_MS;

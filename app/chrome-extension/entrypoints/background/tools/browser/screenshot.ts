@@ -10,7 +10,11 @@ import {
   compressImage,
 } from '../../../../utils/image-utils';
 import { screenshotContextManager } from '@/utils/screenshot-context';
-import { isBrowserActionError, structuredErrorFromException, BrowserActionError } from '@/common/browser-errors';
+import {
+  isBrowserActionError,
+  structuredErrorFromException,
+  BrowserActionError,
+} from '@/common/browser-errors';
 import { K_MSG } from '@/common/kareenos-tool-names';
 import { coreCall } from './core-bridge';
 import { resolveTarget } from './target-resolver';
@@ -171,76 +175,115 @@ class ScreenshotTool extends BaseBrowserToolExecutor {
         try {
           const tabId = tab.id!;
           const { cdpSessionManager } = await import('@/utils/cdp-session-manager');
-          await cdpSessionManager.withSession(tabId, 'screenshot', async () => {
-            const metrics: any = await cdpSessionManager.sendCommand(
-              tabId,
-              'Page.getLayoutMetrics',
-              {},
-            );
-            const viewport = metrics?.cssLayoutViewport ||
-              metrics?.layoutViewport ||
-              metrics?.visualViewport || { clientWidth: 800, clientHeight: 600 };
-            const content = metrics?.cssContentSize || metrics?.contentSize;
+          // One retry (2026-10-21): the first CDP capture after a navigation or a
+          // debugger detach fails with a transient "not attached" / empty data; the
+          // helper fallback that followed then raised "Error message from listener
+          // couldn't be parsed or was empty" 11 times in four days.
+          let attempt = 0;
+          const captureOnce = async () =>
+            cdpSessionManager.withSession(tabId, 'screenshot', async () => {
+              const metrics: any = await cdpSessionManager.sendCommand(
+                tabId,
+                'Page.getLayoutMetrics',
+                {},
+              );
+              const viewport = metrics?.cssLayoutViewport ||
+                metrics?.layoutViewport ||
+                metrics?.visualViewport || { clientWidth: 800, clientHeight: 600 };
+              const content = metrics?.cssContentSize || metrics?.contentSize;
 
-            const shotParams: any = { format: 'png', captureBeyondViewport: true };
-            let widthCss: number;
-            let heightCss: number;
+              const shotParams: any = { format: 'png', captureBeyondViewport: true };
+              let widthCss: number;
+              let heightCss: number;
 
-            if (selector || args.ref) {
-              // Element clip in ANY frame: resolve the target (ref or selector,
-              // deep-shadow, text=) and translate its rect to top-document page
-              // coordinates through same-origin frame elements. A cross-origin
-              // ancestor blocks the walk → viewport capture with a warning.
-              const laneId = args.laneId || 'default';
-              const target = await resolveTarget(tabId, laneId, { ref: args.ref, selector, frame: args.frame, kind: 'any' });
-              const rect: any = await coreCall(tabId, target.frameId, { action: K_MSG.ELEMENT_RECT, ref: target.helperRef, expect_epoch: target.expectEpoch });
-              if (!rect || !rect.width || !rect.height) {
-                throw new BrowserActionError('NOT_VISIBLE', `The element ${target.ref} has no visible box to capture.`, { ref: target.ref });
-              }
-              clipTarget = { ref: target.ref, role: target.role, name: target.name };
-              clipFrame = { id: target.frameId, url: target.frameUrl || undefined };
-              if (rect.chain_complete && typeof rect.page_x === 'number') {
-                shotParams.clip = { x: rect.page_x, y: rect.page_y, width: rect.width, height: rect.height, scale: 1 };
-                widthCss = Math.round(rect.width);
-                heightCss = Math.round(rect.height);
-                clipKind = 'element';
+              if (selector || args.ref) {
+                // Element clip in ANY frame: resolve the target (ref or selector,
+                // deep-shadow, text=) and translate its rect to top-document page
+                // coordinates through same-origin frame elements. A cross-origin
+                // ancestor blocks the walk → viewport capture with a warning.
+                const laneId = args.laneId || 'default';
+                const target = await resolveTarget(tabId, laneId, {
+                  ref: args.ref,
+                  selector,
+                  frame: args.frame,
+                  kind: 'any',
+                });
+                const rect: any = await coreCall(tabId, target.frameId, {
+                  action: K_MSG.ELEMENT_RECT,
+                  ref: target.helperRef,
+                  expect_epoch: target.expectEpoch,
+                });
+                if (!rect || !rect.width || !rect.height) {
+                  throw new BrowserActionError(
+                    'NOT_VISIBLE',
+                    `The element ${target.ref} has no visible box to capture.`,
+                    { ref: target.ref },
+                  );
+                }
+                clipTarget = { ref: target.ref, role: target.role, name: target.name };
+                clipFrame = { id: target.frameId, url: target.frameUrl || undefined };
+                if (rect.chain_complete && typeof rect.page_x === 'number') {
+                  shotParams.clip = {
+                    x: rect.page_x,
+                    y: rect.page_y,
+                    width: rect.width,
+                    height: rect.height,
+                    scale: 1,
+                  };
+                  widthCss = Math.round(rect.width);
+                  heightCss = Math.round(rect.height);
+                  clipKind = 'element';
+                } else {
+                  shotParams.captureBeyondViewport = false;
+                  widthCss = Math.round(viewport.clientWidth || 800);
+                  heightCss = Math.round(viewport.clientHeight || 600);
+                  clipKind = 'viewport';
+                  clipWarning = `element ${target.ref} sits inside a cross-origin frame; captured the viewport (element scrolled into view) instead of an exact clip`;
+                }
+              } else if (fullPage) {
+                clipKind = 'full_page';
+                const w = Math.ceil((content && content.width) || viewport.clientWidth || 800);
+                const h = Math.ceil((content && content.height) || viewport.clientHeight || 600);
+                shotParams.clip = { x: 0, y: 0, width: w, height: h, scale: 1 };
+                widthCss = w;
+                heightCss = h;
               } else {
+                // Current viewport only.
                 shotParams.captureBeyondViewport = false;
                 widthCss = Math.round(viewport.clientWidth || 800);
                 heightCss = Math.round(viewport.clientHeight || 600);
-                clipKind = 'viewport';
-                clipWarning = `element ${target.ref} sits inside a cross-origin frame; captured the viewport (element scrolled into view) instead of an exact clip`;
               }
-            } else if (fullPage) {
-              clipKind = 'full_page';
-              const w = Math.ceil((content && content.width) || viewport.clientWidth || 800);
-              const h = Math.ceil((content && content.height) || viewport.clientHeight || 600);
-              shotParams.clip = { x: 0, y: 0, width: w, height: h, scale: 1 };
-              widthCss = w;
-              heightCss = h;
-            } else {
-              // Current viewport only.
-              shotParams.captureBeyondViewport = false;
-              widthCss = Math.round(viewport.clientWidth || 800);
-              heightCss = Math.round(viewport.clientHeight || 600);
-            }
 
-            const shot: any = await cdpSessionManager.sendCommand(
-              tabId,
-              'Page.captureScreenshot',
-              shotParams,
-            );
-            const base64Data = typeof shot?.data === 'string' ? shot.data : '';
-            if (!base64Data) {
-              throw new Error('CDP Page.captureScreenshot returned empty data');
+              const shot: any = await cdpSessionManager.sendCommand(
+                tabId,
+                'Page.captureScreenshot',
+                shotParams,
+              );
+              const base64Data = typeof shot?.data === 'string' ? shot.data : '';
+              if (!base64Data) {
+                throw new Error('CDP Page.captureScreenshot returned empty data');
+              }
+              finalImageDataUrl = `data:image/png;base64,${base64Data}`;
+              finalImageWidthCss = widthCss;
+              finalImageHeightCss = heightCss;
+            });
+          for (;;) {
+            try {
+              await captureOnce();
+              break;
+            } catch (e) {
+              if (isBrowserActionError(e) || attempt >= 1) throw e;
+              attempt++;
+              console.warn(
+                'CDP capture failed once, retrying:',
+                e instanceof Error ? e.message : e,
+              );
+              await new Promise((r) => setTimeout(r, 300));
             }
-            finalImageDataUrl = `data:image/png;base64,${base64Data}`;
-            finalImageWidthCss = widthCss;
-            finalImageHeightCss = heightCss;
-          });
+          }
         } catch (e) {
           if (isBrowserActionError(e)) throw e; // a targeting failure is an answer, not a fallback
-          console.warn('CDP capture failed, falling back to helper path:', e);
+          console.warn('CDP capture failed twice, falling back to helper path:', e);
         }
       }
 

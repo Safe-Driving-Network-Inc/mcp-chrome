@@ -1,9 +1,10 @@
 import { ToolExecutor } from '@/common/tool-handler';
 import type { ToolResult } from '@/common/tool-handler';
 import { TIMEOUTS, ERROR_MESSAGES } from '@/common/constants';
-import { errorFromResponse } from '@/common/browser-errors';
+import { errorFromResponse, BrowserActionError } from '@/common/browser-errors';
 
 const PING_TIMEOUT_MS = 300;
+const SEND_MESSAGE_TIMEOUT_MS = 10_000;
 
 // Attended channel must be NON-INTRUSIVE: the agent works in the background and
 // must never raise Chrome to the OS foreground over whatever app the user is in.
@@ -17,7 +18,9 @@ export const BRING_WINDOW_TO_FRONT_DEFAULT = false;
 // lane's tab must be the visible one and a popup window must come back to
 // front, so both flags flip to true there. Attended keeps the defaults.
 import { isHosted } from '../channel-mode';
-export function bringWindowToFront(): boolean { return isHosted() ? true : BRING_WINDOW_TO_FRONT_DEFAULT; }
+export function bringWindowToFront(): boolean {
+  return isHosted() ? true : BRING_WINDOW_TO_FRONT_DEFAULT;
+}
 export const BRING_WINDOW_TO_FRONT = BRING_WINDOW_TO_FRONT_DEFAULT;
 
 // Keep the agent's tab ACTIVE within its window? When false (fully background),
@@ -29,7 +32,9 @@ export const BRING_WINDOW_TO_FRONT = BRING_WINDOW_TO_FRONT_DEFAULT;
 // such a site, flip this to true so the channel tab stays active in its window
 // (it still never raises Chrome to the OS foreground — that's BRING_WINDOW_TO_FRONT).
 export const ACTIVATE_CHANNEL_TAB_DEFAULT = false;
-export function activateChannelTab(): boolean { return isHosted() ? true : ACTIVATE_CHANNEL_TAB_DEFAULT; }
+export function activateChannelTab(): boolean {
+  return isHosted() ? true : ACTIVATE_CHANNEL_TAB_DEFAULT;
+}
 export const ACTIVATE_CHANNEL_TAB = ACTIVATE_CHANNEL_TAB_DEFAULT;
 
 // Kareenos attended browser channel — each LANE (one concurrent agent task on
@@ -49,9 +54,14 @@ export const DEFAULT_LANE = 'default';
 
 // Upper bound on concurrent lane tabs. When a NEW lane needs a tab past the
 // cap, the least-recently-used lane's tab is closed (that agent recovers by
-// navigating again — it loses page state, so keep this generous vs. the
-// realistic 3-4 concurrent agents).
-const MAX_LANE_TABS = 8;
+// navigating again — it loses page state). 8 → 3 on 2026-10-21: lanes are now
+// closed when their run releases the browser (lane_close), so the cap only has
+// to cover runs that are genuinely concurrent, and every extra LinkedIn tab in a
+// 3 GiB Cloud Browser is memory the kernel's OOM killer eventually comes for.
+export const MAX_LANE_TABS = 3;
+// Popups a lane's tab opened (window.open, target=_blank): closed with the lane.
+const LANE_POPUPS_KEY = 'kareenos:lanePopups';
+type LanePopupMap = Record<string, number[]>;
 
 interface LaneTabEntry {
   tabId: number;
@@ -161,14 +171,178 @@ function pruneLaneTabsForTab(tabId: number): Promise<void> {
   });
 }
 
+async function readLanePopups(): Promise<LanePopupMap> {
+  try {
+    const o = await chrome.storage.session.get(LANE_POPUPS_KEY);
+    const raw = o?.[LANE_POPUPS_KEY];
+    return raw && typeof raw === 'object' ? { ...raw } : {};
+  } catch {
+    return {};
+  }
+}
+async function writeLanePopups(map: LanePopupMap): Promise<void> {
+  try {
+    await chrome.storage.session.set({ [LANE_POPUPS_KEY]: map });
+  } catch {
+    /* noop */
+  }
+}
+// A tab opened BY a lane's tab (or by one of its popups) belongs to that lane.
+async function notePopup(tab: chrome.tabs.Tab): Promise<void> {
+  if (!tab || typeof tab.id !== 'number' || typeof tab.openerTabId !== 'number') return;
+  const lanes = await readLaneTabs();
+  const popups = await readLanePopups();
+  let owner: string | null = null;
+  for (const lane of Object.keys(lanes)) if (lanes[lane].tabId === tab.openerTabId) owner = lane;
+  if (!owner)
+    for (const lane of Object.keys(popups))
+      if ((popups[lane] || []).includes(tab.openerTabId)) owner = lane;
+  if (!owner) return;
+  popups[owner] = Array.from(new Set([...(popups[owner] || []), tab.id])).slice(-20);
+  await writeLanePopups(popups);
+}
+async function forgetPopup(tabId: number): Promise<void> {
+  const popups = await readLanePopups();
+  let changed = false;
+  for (const lane of Object.keys(popups)) {
+    const next = (popups[lane] || []).filter((id) => id !== tabId);
+    if (next.length !== (popups[lane] || []).length) {
+      changed = true;
+      if (next.length) popups[lane] = next;
+      else delete popups[lane];
+    }
+  }
+  if (changed) await writeLanePopups(popups);
+}
+
+async function closeTabKeepingWindow(tabId: number): Promise<'closed' | 'blanked' | 'gone'> {
+  let tab: chrome.tabs.Tab | null = null;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    return 'gone';
+  }
+  // Closing the LAST tab of the last window would quit Chromium — in a Cloud
+  // Browser that is the whole browser. Park it on about:blank instead.
+  try {
+    const all = await chrome.tabs.query({});
+    if (all.length <= 1) {
+      await chrome.tabs.update(tabId, { url: 'about:blank' });
+      return 'blanked';
+    }
+  } catch {
+    /* fall through to remove */
+  }
+  try {
+    await chrome.tabs.remove(tabId);
+    return 'closed';
+  } catch {
+    return 'gone';
+  }
+}
+
+/** The run that drove this lane let go (lane_close): close its tab and its popups, forget its refs. */
+export async function closeLane(
+  laneId: string,
+): Promise<{ lane: string; tab: 'closed' | 'blanked' | 'gone' | 'none'; popups_closed: number }> {
+  const lane = laneId || DEFAULT_LANE;
+  const tabId = await getLaneTabId(lane);
+  const popups = await readLanePopups();
+  const mine = popups[lane] || [];
+  let popupsClosed = 0;
+  for (const id of mine) {
+    const r = await closeTabKeepingWindow(id);
+    if (r === 'closed') popupsClosed++;
+  }
+  if (mine.length) {
+    delete popups[lane];
+    await writeLanePopups(popups);
+  }
+  let tabResult: 'closed' | 'blanked' | 'gone' | 'none' = 'none';
+  if (tabId != null) {
+    tabResult = await closeTabKeepingWindow(tabId);
+    await setLaneTab(lane, null);
+  }
+  try {
+    await chrome.storage.session.remove('kareenos:refBook:' + lane);
+  } catch {
+    /* noop */
+  }
+  return { lane, tab: tabResult, popups_closed: popupsClosed };
+}
+
+// Orphan sweep (hosted browsers only, 2026-10-21): a tab that belongs to no lane
+// and to no lane's popups, has sat there for ORPHAN_AFTER_MS, is not the active
+// tab of its window and is an http(s) page, is closed. A browser whose only tab
+// qualifies keeps it. First-seen times live in memory: the socket keeps this
+// worker alive, and a fresh worker simply starts the clock again (conservative).
+const ORPHAN_AFTER_MS = 10 * 60 * 1000;
+const orphanFirstSeen = new Map<number, number>();
+let lastSweepAt = 0;
+export async function sweepOrphanTabs(
+  minIntervalMs = 60_000,
+): Promise<{ closed: number; candidates: number; lanes: number }> {
+  const now = Date.now();
+  if (now - lastSweepAt < minIntervalMs) return { closed: 0, candidates: 0, lanes: 0 };
+  lastSweepAt = now;
+  const lanes = await readLaneTabs();
+  const popups = await readLanePopups();
+  const known = new Set<number>();
+  Object.values(lanes).forEach((e) => known.add(e.tabId));
+  Object.values(popups).forEach((ids) => ids.forEach((id) => known.add(id)));
+  let tabs: chrome.tabs.Tab[] = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch {
+    return { closed: 0, candidates: 0, lanes: Object.keys(lanes).length };
+  }
+  // Lane entries whose tab is gone are pruned (a resumed browser keeps the
+  // session map but not necessarily the tabs).
+  const live = new Set(tabs.map((t) => t.id).filter((id): id is number => typeof id === 'number'));
+  for (const lane of Object.keys(lanes))
+    if (!live.has(lanes[lane].tabId)) await setLaneTab(lane, null);
+  let closed = 0;
+  let candidates = 0;
+  for (const t of tabs) {
+    if (typeof t.id !== 'number' || known.has(t.id)) continue;
+    if (!/^https?:/i.test(t.url || '')) continue;
+    candidates++;
+    const first = orphanFirstSeen.get(t.id) || now;
+    if (!orphanFirstSeen.has(t.id)) orphanFirstSeen.set(t.id, now);
+    if (now - first < ORPHAN_AFTER_MS) continue;
+    if (t.active) continue; // somebody may be looking at it in the live view
+    const r = await closeTabKeepingWindow(t.id);
+    if (r === 'closed') {
+      closed++;
+      orphanFirstSeen.delete(t.id);
+    }
+  }
+  for (const id of Array.from(orphanFirstSeen.keys()))
+    if (!live.has(id)) orphanFirstSeen.delete(id);
+  if (closed)
+    console.log(
+      `[BC] orphan sweep closed ${closed} tab(s) (candidates ${candidates}, lanes ${Object.keys(lanes).length})`,
+    );
+  return { closed, candidates, lanes: Object.keys(lanes).length };
+}
+
 // Registered at module load — this module is imported on every MV3 SW spin-up
 // (tools → background/index.ts), so the listener is always re-armed.
 try {
   chrome.tabs.onRemoved.addListener((tabId) => {
     void pruneLaneTabsForTab(tabId);
+    void forgetPopup(tabId);
+    orphanFirstSeen.delete(tabId);
   });
 } catch {
   /* tabs API unavailable in some contexts */
+}
+try {
+  chrome.tabs.onCreated.addListener((tab) => {
+    void notePopup(tab);
+  });
+} catch {
+  /* ignore */
 }
 
 /**
@@ -237,7 +411,14 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
         return active;
       }
     }
-    throw new Error('No tab is open for this task yet — navigate to a URL first');
+    // NAV_REQUIRED (2026-10-21): a code agents can branch on. Before it, this was a
+    // bare Error that surfaced as EXECUTION_ERROR; every one of its 70 occurrences
+    // on 17–21 Oct was a read dispatched beside the navigate of the same turn.
+    throw new BrowserActionError(
+      'NAV_REQUIRED',
+      'No tab is open for this task yet — navigate to a URL first',
+      { lane: laneId },
+    );
   }
 
   /**
@@ -376,10 +557,32 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
 
   protected async sendMessageToTab(tabId: number, message: any, frameId?: number): Promise<any> {
     try {
-      const response =
+      // A helper that never answers (a frame mid-unload, a page that froze the
+      // isolated world) used to hold the whole command — and the lane — until the
+      // server gave up. Every helper call now has its own deadline (2026-10-21).
+      const limitMs =
+        Number(message && message.__timeout_ms) > 0
+          ? Number(message.__timeout_ms)
+          : SEND_MESSAGE_TIMEOUT_MS;
+      const send =
         typeof frameId === 'number'
-          ? await chrome.tabs.sendMessage(tabId, message, { frameId })
-          : await chrome.tabs.sendMessage(tabId, message);
+          ? chrome.tabs.sendMessage(tabId, message, { frameId })
+          : chrome.tabs.sendMessage(tabId, message);
+      const response = await Promise.race([
+        send,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new BrowserActionError(
+                  'NO_FRAME_ACCESS',
+                  `The page helper did not answer ${message?.action || 'the message'} within ${limitMs} ms (frame ${frameId ?? 'top'} hung or unloading)`,
+                ),
+              ),
+            limitMs,
+          ),
+        ),
+      ]);
 
       if (response && response.error) {
         // v2 helpers answer { error: { code, message, details } } — keep it

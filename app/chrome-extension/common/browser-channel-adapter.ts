@@ -30,7 +30,8 @@ export type BrowserAction =
   | 'snapshot'
   | 'wait'
   | 'press'
-  | 'run_steps';
+  | 'run_steps'
+  | 'lane_close';
 
 export interface CommandEnvelope {
   command_id: string;
@@ -77,12 +78,14 @@ export const ACTION_DEFAULT_MS: Record<BrowserAction, number> = {
   upload: 120000,
   wait: 20000,
   run_steps: 290000,
+  lane_close: 8000,
 };
 export const TIMEOUT_MARGIN_MS = 3000;
 
 // The budget a tool gets: answer before the server stops waiting.
 export function budgetFor(action: BrowserAction, timeoutMs?: number | null): number {
-  const base = typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : ACTION_DEFAULT_MS[action] || 15000;
+  const base =
+    typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : ACTION_DEFAULT_MS[action] || 15000;
   return Math.max(1000, base - TIMEOUT_MARGIN_MS);
 }
 
@@ -154,13 +157,17 @@ const ACTION_MAP: Record<
   },
   upload: {
     tool: TOOL_NAMES.BROWSER.FILE_UPLOAD, // chrome_upload_file
-    // Bytes arrive base64 IN the command (server-resolved) — the extension
-    // never fetches storage URLs (they may point at an internal endpoint).
+    // Small files arrive base64 IN the command (server-resolved); since
+    // 2026-10-19 a larger file arrives as its PUBLIC Kareenos link (source_url
+    // + size_bytes) and the tool downloads it in pieces — only links the
+    // server built, never arbitrary URLs.
     buildArgs: (a) => ({
       selector: orUndef(a.selector),
       ref: orUndef(a.ref),
       frame: orUndef(a.frame),
-      base64Data: a.base64,
+      base64Data: orUndef(a.base64),
+      sourceUrl: orUndef(a.source_url),
+      sizeBytes: a.size_bytes ? Number(a.size_bytes) : undefined,
       fileName: a.file_name || undefined,
       mimeType: a.mime_type || undefined,
     }),
@@ -203,7 +210,32 @@ const ACTION_MAP: Record<
       stop_on_error: a.stop_on_error !== false,
     }),
   },
+  lane_close: {
+    tool: KAREENOS_TOOL_NAMES.LANE_CLOSE,
+    buildArgs: (a) => ({ reason: orUndef(a.reason) }),
+  },
 };
+
+// Extension-side timings every result carries (data.timing): when the frame was
+// received, when the lane started it, when it finished — so a slow result can be
+// told apart from a command that waited in its lane (2026-10-21).
+export interface ResultTiming {
+  received_at: number;
+  started_at: number;
+  finished_at?: number;
+  queued_ms: number;
+  run_ms?: number;
+  queue_position?: number;
+  budget_ms?: number;
+}
+export function withTiming(env: ResultEnvelope, timing?: ResultTiming | null): ResultEnvelope {
+  if (!timing) return env;
+  const t: ResultTiming = { ...timing };
+  if (t.finished_at == null) t.finished_at = Date.now();
+  if (t.run_ms == null && t.started_at) t.run_ms = t.finished_at - t.started_at;
+  env.data = { ...(env.data || {}), timing: t };
+  return env;
+}
 
 export function isSupportedAction(action: string): action is BrowserAction {
   return Object.prototype.hasOwnProperty.call(ACTION_MAP, action);
@@ -262,7 +294,9 @@ export function toResultEnvelope(
         status: 'failed',
         message: `[${structured.code}] ${structured.message}`,
         data,
-        errors: [{ code: structured.code, message: structured.message, severity: 'error', details }],
+        errors: [
+          { code: structured.code, message: structured.message, severity: 'error', details },
+        ],
       };
     }
     return {
@@ -286,7 +320,7 @@ export function toResultEnvelope(
   if (action === 'screenshot') {
     let base64 = '';
     let mediaType = 'image/jpeg';
-    let extra: Record<string, any> = {};
+    const extra: Record<string, any> = {};
     try {
       const parsed = JSON.parse(text);
       base64 = parsed.base64Data || parsed.base64 || '';
